@@ -45,7 +45,9 @@ DFG::DFG(std::initializer_list<std::pair<int, int>> list)
         add_edge(edge.first, edge.second);
 }
 
-std::unique_ptr<DFG> DFG::make_dfg(std::istream &in, bool set_weights)
+std::unique_ptr<DFG> DFG::make_dfg(std::istream &in,
+                                   bool set_weights,
+                                   bool forbid_sources_and_sinks)
 {
     std::string line;
     int nodes = 0;
@@ -62,7 +64,8 @@ std::unique_ptr<DFG> DFG::make_dfg(std::istream &in, bool set_weights)
                 !parse_integer(fields[5], freq, 0, INT_MAX))
                 throw std::runtime_error("invalid line");
 
-            dfg = std::make_unique<DFG>(fields[4], nodes, freq);
+            dfg = std::make_unique<DFG>(
+                fields[4], nodes, freq, forbid_sources_and_sinks);
         } else if (fields[0] == "e") {
             int u;
             int v;
@@ -132,7 +135,9 @@ intset DFG::forbidden() const
 {
     intset s(num_nodes());
     for (int i = 0; i < num_nodes(); i++) {
-        if (is_forbidden(i) || in_edges(i).empty() || out_edges(i).empty())
+        if (is_forbidden(i) ||
+            (forbid_sources_and_sinks_ &&
+             (in_edges(i).empty() || out_edges(i).empty())))
             s.add(i);
     }
     return s;

@@ -24,15 +24,21 @@ class DFG {
     };
 
 public:
-    DFG(std::string name, int num_nodes, int frequency)
+    DFG(std::string name,
+        int num_nodes,
+        int frequency,
+        bool forbid_sources_and_sinks = true)
         : name_(std::move(name))
         , frequency_(frequency)
+        , forbid_sources_and_sinks_(forbid_sources_and_sinks)
     {
         for (int i = 0; i < num_nodes; i++)
             nodes_.emplace_back(num_nodes);
     }
     DFG(std::initializer_list<std::pair<int, int>> list);
-    static std::unique_ptr<DFG> make_dfg(std::istream &in, bool set_weights);
+    static std::unique_ptr<DFG> make_dfg(std::istream &in,
+                                         bool set_weights,
+                                         bool forbid_sources_and_sinks = true);
 
     void add_edge(int u, int v)
     {
@@ -61,6 +67,7 @@ public:
 private:
     std::string name_;
     int frequency_ = 0;
+    bool forbid_sources_and_sinks_ = true;
 
     std::vector<Node> nodes_;
 };
