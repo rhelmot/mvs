@@ -61,6 +61,12 @@ std::vector<SCluster> scluster_enumerate(const DFG &dfg)
             }
         }
 
+        // S-clusters are assumed to have a valid external source and sink.
+        // This held when graph sources/sinks were always forbidden, but can
+        // fail once that behavior is optional. Skip non-SESE subgraphs here.
+        if (vi == -1 || vo == -1)
+            continue;
+
         output.emplace_back(std::move(nodes), std::move(edges), vi, vo);
     }
     return output;
