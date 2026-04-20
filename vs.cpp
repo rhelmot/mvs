@@ -36,6 +36,13 @@ static intset config_exclusion(const DFG &dfg, const intset &config)
 {
     intset out(dfg.forbidden());
 
+    // The exhaustive enumerator grows subgraphs from candidate outputs.
+    // Upstream assumed graph sinks were already forbidden, which seeded this
+    // exclusion set. When sinks are allowed, seed with actual sinks instead.
+    for (int u = 0; u < dfg.num_nodes(); u++)
+        if (dfg.out_edges(u).empty())
+            out.add(u);
+
     for (int b = dfg.num_nodes() - 1; b >= 0; b--)
         if (out.contains(b))
             for (auto &a : dfg.in_edges(b)) {
