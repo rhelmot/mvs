@@ -106,6 +106,28 @@ static bool is_weakly_connected_subgraph(const DFG &dfg, const intset &nodes)
     return visited.size() == nodes.size();
 }
 
+static intset augmented_nodes(const DFG &dfg, const intset &nodes)
+{
+    intset augmented(nodes);
+    for (const auto &u : nodes) {
+        for (const auto &v : dfg.in_edges(u)) {
+            if (!nodes.contains(v))
+                augmented.add(v);
+        }
+    }
+    return augmented;
+}
+
+static bool is_weakly_connected_with_inputs(const DFG &dfg,
+                                            const IOSubgraph &config)
+{
+    intset nodes(config.nodes());
+    for (const auto &u : config.inputs())
+        if (u < dfg.num_nodes())
+            nodes.add(u);
+    return is_weakly_connected_subgraph(dfg, nodes);
+}
+
 class VSFinder {
 public:
     VSFinder(const DFG &dfg, const Subgraph &outputs, bool connected_only = false)
@@ -303,11 +325,21 @@ public:
         , config_(dfg)
         , forbidden_(dfg.forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , augmented_closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , neighborhoods_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , valid_(dfg.num_nodes(), false)
     {
         for (int u = 0; u < dfg_.num_nodes(); u++) {
             closures_[u].add(u);
             closures_[u].add(dfg_.succ(u));
+            augmented_closures_[u] = augmented_nodes(dfg_, closures_[u]);
+            neighborhoods_[u] = augmented_closures_[u];
+            for (const auto &v : augmented_closures_[u]) {
+                for (const auto &w : dfg_.in_edges(v))
+                    neighborhoods_[u].add(w);
+                for (const auto &w : dfg_.out_edges(v))
+                    neighborhoods_[u].add(w);
+            }
             valid_[u] = !closures_[u].intersects(forbidden_);
         }
     }
@@ -319,7 +351,8 @@ public:
                 continue;
 
             add_nodes(config_, closures_[root]);
-            if (config_.num_in() <= max_num_in_)
+            if (config_.num_in() <= max_num_in_ &&
+                is_weakly_connected_with_inputs(dfg_, config_))
                 output_cb_(config_);
 
             intset blocked(dfg_.num_nodes());
@@ -328,10 +361,11 @@ public:
             blocked.add(dfg_.succ(root));
 
             intset frontier(dfg_.num_nodes());
+            intset current_augmented = augmented_nodes(dfg_, config_.nodes());
             for (int u = root + 1; u < dfg_.num_nodes(); u++) {
                 if (!valid_[u] || blocked.contains(u))
                     continue;
-                if (closures_[u].intersects(config_.nodes()))
+                if (neighborhoods_[u].intersects(current_augmented))
                     frontier.add(u);
             }
 
@@ -360,14 +394,16 @@ private:
             add_nodes(config_, added);
 
             if (config_.num_in() <= max_num_in_) {
-                output_cb_(config_);
+                if (is_weakly_connected_with_inputs(dfg_, config_))
+                    output_cb_(config_);
 
                 intset frontier_next(frontier);
+                intset current_augmented = augmented_nodes(dfg_, config_.nodes());
                 for (int u = next + 1; u < dfg_.num_nodes(); u++) {
                     if (!valid_[u] || blocked_next.contains(u) ||
                         frontier_next.contains(u))
                         continue;
-                    if (closures_[u].intersects(config_.nodes()))
+                    if (neighborhoods_[u].intersects(current_augmented))
                         frontier_next.add(u);
                 }
 
@@ -384,6 +420,8 @@ private:
     IOSubgraph config_;
     intset forbidden_;
     std::vector<intset> closures_;
+    std::vector<intset> augmented_closures_;
+    std::vector<intset> neighborhoods_;
     std::vector<bool> valid_;
 };
 
