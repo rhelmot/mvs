@@ -382,6 +382,8 @@ public:
             for (int u = root + 1; u < dfg_.num_nodes(); u++) {
                 if (!valid_[u] || blocked.contains(u))
                     continue;
+                if (closures_[u].is_subset_of(config_.nodes()))
+                    continue;
                 if (neighborhoods_[u].intersects(current_augmented))
                     frontier.add(u);
             }
@@ -408,6 +410,8 @@ private:
 
             intset added(closures_[next]);
             added.remove(config_.nodes());
+            if (added.minimum() == static_cast<unsigned>(-1))
+                continue;
             add_nodes(config_, added);
 
             if ((max_subgraph_size_ < 0 ||
@@ -421,6 +425,8 @@ private:
                 for (int u = next + 1; u < dfg_.num_nodes(); u++) {
                     if (!valid_[u] || blocked_next.contains(u) ||
                         frontier_next.contains(u))
+                        continue;
+                    if (closures_[u].is_subset_of(config_.nodes()))
                         continue;
                     if (neighborhoods_[u].intersects(current_augmented))
                         frontier_next.add(u);
