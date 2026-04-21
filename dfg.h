@@ -55,6 +55,7 @@ public:
 
     const std::string &name() const { return name_; }
     int num_nodes() const { return nodes_.size(); }
+    bool forbid_sources_and_sinks() const { return forbid_sources_and_sinks_; }
     double weight(int u) const { return nodes_[u].weight; }
     double &weight(int u) { return nodes_[u].weight; }
     const vset<int> &in_edges(int u) const { return nodes_[u].in_list; }

@@ -238,13 +238,17 @@ void IOSubgraph::init_io()
     inputs_.clear();
     outputs_.clear();
 
-    for (int i = 0; i < dfg_->num_nodes(); i++) {
-        if (!nodes_.contains(i)) {
-            if (has_internal_successor(*dfg_, nodes_, i, i))
-                inputs_.add(i);
-        } else {
-            if (has_external_successor(*dfg_, nodes_, i, i))
-                outputs_.add(i);
+    for (const auto &u : nodes_) {
+        for (const auto &v : dfg_->in_edges(u)) {
+            if (!nodes_.contains(v))
+                inputs_.add(v);
+        }
+
+        for (const auto &v : dfg_->out_edges(u)) {
+            if (!nodes_.contains(v)) {
+                outputs_.add(u);
+                break;
+            }
         }
     }
 }
