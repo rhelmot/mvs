@@ -42,6 +42,7 @@ public:
     MVSFinder(DFG *dfg);
     std::vector<IOSubgraph> enumerate(int max_num_in,
                                       int max_num_out,
+                                      int max_subgraph_size,
                                       IterType itype,
                                       uint8_t flags);
     const intset &nodes() const { return config_.nodes(); }
@@ -78,6 +79,7 @@ private:
     IOSubgraph config_;
     IterType itype_;
     uint8_t flags_;
+    int max_subgraph_size_;
     intset nodes_left_;
     intset clustered_;
     unsigned count_;

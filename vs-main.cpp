@@ -75,6 +75,7 @@ int main(int argc, char *argv[])
     vs_enumerate(*dfg,
                  max_num_in,
                  max_num_out,
+                 -1,
                  [&max_weight, &output, enum_all](const IOSubgraph &subgraph) {
                      double weight = subgraph.weight();
                      if (enum_all || weight >= max_weight) {

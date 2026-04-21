@@ -130,9 +130,13 @@ static bool is_weakly_connected_with_inputs(const DFG &dfg,
 
 class VSFinder {
 public:
-    VSFinder(const DFG &dfg, const Subgraph &outputs, bool connected_only = false)
+    VSFinder(const DFG &dfg,
+             const Subgraph &outputs,
+             int max_subgraph_size = -1,
+             bool connected_only = false)
         : config_(dfg, outputs.closure())
         , F_(config_exclusion(dfg, outputs.nodes()))
+        , max_subgraph_size_(max_subgraph_size)
         , connected_only_(connected_only)
     {
     }
@@ -143,6 +147,7 @@ public:
 private:
     IOSubgraph config_;
     intset F_;
+    int max_subgraph_size_;
     bool connected_only_;
 };
 
@@ -196,6 +201,10 @@ void VSFinder::visit(int max_num_in,
     }
 
     if (num_perm_in > max_num_in)
+        return;
+
+    if (max_subgraph_size_ >= 0 &&
+        config_.nodes().size() > static_cast<unsigned>(max_subgraph_size_))
         return;
 
     if (connected_only_ && !can_still_be_connected(config_))
@@ -282,10 +291,14 @@ void remove_nodes(IOSubgraph &config, const intset &nodes)
 
 void vs_enumerate_zero_inputs_(const DFG &dfg,
                                const Subgraph &outputs,
+                               int max_subgraph_size,
                                const std::function<void(const IOSubgraph &)> &output_cb,
                                bool connected_only)
 {
     intset nodes(outputs.closure());
+    if (max_subgraph_size >= 0 &&
+        nodes.size() > static_cast<unsigned>(max_subgraph_size))
+        return;
     intset F(config_exclusion(dfg, outputs.nodes()));
 
     while (true) {
@@ -318,9 +331,11 @@ class ZeroOutputConnectedFinder {
 public:
     ZeroOutputConnectedFinder(const DFG &dfg,
                               int max_num_in,
+                              int max_subgraph_size,
                               const std::function<void(const IOSubgraph &)> &output_cb)
         : dfg_(dfg)
         , max_num_in_(max_num_in)
+        , max_subgraph_size_(max_subgraph_size)
         , output_cb_(output_cb)
         , config_(dfg)
         , forbidden_(dfg.forbidden())
@@ -351,7 +366,9 @@ public:
                 continue;
 
             add_nodes(config_, closures_[root]);
-            if (config_.num_in() <= max_num_in_ &&
+            if ((max_subgraph_size_ < 0 ||
+                 config_.nodes().size() <= static_cast<unsigned>(max_subgraph_size_)) &&
+                config_.num_in() <= max_num_in_ &&
                 is_weakly_connected_with_inputs(dfg_, config_))
                 output_cb_(config_);
 
@@ -393,7 +410,9 @@ private:
             added.remove(config_.nodes());
             add_nodes(config_, added);
 
-            if (config_.num_in() <= max_num_in_) {
+            if ((max_subgraph_size_ < 0 ||
+                 config_.nodes().size() <= static_cast<unsigned>(max_subgraph_size_)) &&
+                config_.num_in() <= max_num_in_) {
                 if (is_weakly_connected_with_inputs(dfg_, config_))
                     output_cb_(config_);
 
@@ -416,6 +435,7 @@ private:
 
     const DFG &dfg_;
     int max_num_in_;
+    int max_subgraph_size_;
     const std::function<void(const IOSubgraph &)> &output_cb_;
     IOSubgraph config_;
     intset forbidden_;
@@ -427,11 +447,13 @@ private:
 
 void vs_enumerate_zero_outputs_(const DFG &dfg,
                                 int max_num_in,
+                                int max_subgraph_size,
                                 const std::function<void(const IOSubgraph &)> &output_cb,
                                 bool connected_only)
 {
     if (connected_only) {
-        ZeroOutputConnectedFinder(dfg, max_num_in, output_cb).enumerate();
+        ZeroOutputConnectedFinder(
+            dfg, max_num_in, max_subgraph_size, output_cb).enumerate();
         return;
     }
 
@@ -440,10 +462,13 @@ void vs_enumerate_zero_outputs_(const DFG &dfg,
         *reversed,
         0,
         dfg.num_nodes(),
-        [&dfg, max_num_in, connected_only, &output_cb](const IOSubgraph &subgraph) {
+        max_subgraph_size,
+        [&dfg, max_num_in, max_subgraph_size, connected_only, &output_cb](const IOSubgraph &subgraph) {
             IOSubgraph original_subgraph(dfg);
             original_subgraph.set(subgraph.nodes());
-            if (original_subgraph.num_out() == 0 &&
+            if ((max_subgraph_size < 0 ||
+                 original_subgraph.nodes().size() <= static_cast<unsigned>(max_subgraph_size)) &&
+                original_subgraph.num_out() == 0 &&
                 original_subgraph.num_in() <= max_num_in &&
                 (!connected_only ||
                  is_weakly_connected_subgraph(dfg, original_subgraph.nodes()))) {
@@ -458,14 +483,21 @@ void vs_enumerate_(const DFG &dfg,
                    int size,
                    int max_num_in,
                    int max_num_out,
+                   int max_subgraph_size,
                    const std::function<void(const IOSubgraph &)> &output_cb,
                    bool connected_only)
 {
+    if (max_subgraph_size >= 0 &&
+        outputs.closure().size() > static_cast<unsigned>(max_subgraph_size))
+        return;
+
     if (size >= 1) {
         if (max_num_in == 0) {
-            vs_enumerate_zero_inputs_(dfg, outputs, output_cb, connected_only);
+            vs_enumerate_zero_inputs_(
+                dfg, outputs, max_subgraph_size, output_cb, connected_only);
         } else {
-            VSFinder finder(dfg, outputs, connected_only);
+            VSFinder finder(
+                dfg, outputs, max_subgraph_size, connected_only);
             finder.visit(max_num_in, output_cb);
         }
     }
@@ -490,6 +522,7 @@ void vs_enumerate_(const DFG &dfg,
                               size + 1,
                               max_num_in,
                               max_num_out,
+                              max_subgraph_size,
                               output_cb,
                               connected_only);
                 outputs.remove(u);
@@ -503,11 +536,13 @@ void vs_enumerate_(const DFG &dfg,
 void vs_enumerate(const DFG &dfg,
                   int max_num_in,
                   int max_num_out,
+                  int max_subgraph_size,
                   const std::function<void(const IOSubgraph &)> &output_cb,
                   bool connected_only)
 {
     if (max_num_out == 0) {
-        vs_enumerate_zero_outputs_(dfg, max_num_in, output_cb, connected_only);
+        vs_enumerate_zero_outputs_(
+            dfg, max_num_in, max_subgraph_size, output_cb, connected_only);
         return;
     }
 
@@ -518,6 +553,7 @@ void vs_enumerate(const DFG &dfg,
         0,
         max_num_in,
         max_num_out,
+        max_subgraph_size,
         output_cb,
         connected_only);
 }

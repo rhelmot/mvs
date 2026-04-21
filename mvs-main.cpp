@@ -112,7 +112,8 @@ int main(int argc, char *argv[])
 
     const auto start = std::chrono::steady_clock::now();
     MVSFinder finder(dfg.get());
-    auto output = finder.enumerate(max_num_in, max_num_out, itype, flags);
+    auto output =
+        finder.enumerate(max_num_in, max_num_out, -1, itype, flags);
     const auto end = std::chrono::steady_clock::now();
     const std::chrono::duration<double> elapsed = end - start;
 

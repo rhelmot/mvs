@@ -24,6 +24,7 @@ int main(int argc, char **argv)
     auto finder = MVSFinder(dfg.get());
     auto itype = MVSFinder::IterType::LINEAR_REV;
     uint8_t flags = 0xff;
-    auto output = finder.enumerate(max_num_in, max_num_out, itype, flags);
+    auto output =
+        finder.enumerate(max_num_in, max_num_out, -1, itype, flags);
     assert(output.size() == output_size);
 }

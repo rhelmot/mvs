@@ -106,7 +106,8 @@ void MVSFinder::visit(double dels,
     if (dels < 0 || (count_ && single))
         return;
 
-    if (config_.num_in() <= max_num_in && config_.num_out() <= max_num_out) {
+    if ((max_subgraph_size_ < 0 || config_.nodes().size() <= static_cast<unsigned>(max_subgraph_size_)) &&
+        config_.num_in() <= max_num_in && config_.num_out() <= max_num_out) {
         double weight = config_.weight();
         int iweight = weight;
         for (auto &cluster : s_clusters_)
@@ -133,6 +134,13 @@ void MVSFinder::visit(double dels,
         for (auto &cluster : s_nodes_)
             cluster.contract(config_);
         return;
+    }
+
+    if (max_subgraph_size_ >= 0) {
+        unsigned fixed_included =
+            config_.nodes().size() - nodes_left_.size();
+        if (fixed_included > static_cast<unsigned>(max_subgraph_size_))
+            return;
     }
 
     // pruning
@@ -342,11 +350,13 @@ void MVSFinder::find_mvsio(mvs &mvs,
 
 std::vector<IOSubgraph> MVSFinder::enumerate(int max_num_in,
                                              int max_num_out,
+                                             int max_subgraph_size,
                                              IterType itype,
                                              uint8_t flags)
 {
     itype_ = itype;
     flags_ = flags;
+    max_subgraph_size_ = max_subgraph_size;
     nlohmann::json json = {
         {"num_inputs", max_num_in},
         {"num_outputs", max_num_out},
@@ -367,7 +377,9 @@ std::vector<IOSubgraph> MVSFinder::enumerate(int max_num_in,
 
         int m = flags_ & (1 << 5) ? max_io_weight : 0;
         if (mvsc.weight() >= m) {
-            if (mvsc.num_in() > max_num_in || mvsc.num_out() > max_num_out)
+            if ((max_subgraph_size_ >= 0 &&
+                 mvsc.nodes().size() > static_cast<unsigned>(max_subgraph_size_)) ||
+                mvsc.num_in() > max_num_in || mvsc.num_out() > max_num_out)
                 find_mvsio(mvsc, true, m, max_num_in, max_num_out);
             else
                 mvsc.io_weight = mvsc.weight();
@@ -387,7 +399,9 @@ std::vector<IOSubgraph> MVSFinder::enumerate(int max_num_in,
                 {"mvs", mvsc},
             };
             std::cerr << json.dump() << std::endl;
-            if (mvsc.io_weight < mvsc.weight())
+            if ((max_subgraph_size_ >= 0 &&
+                 mvsc.nodes().size() > static_cast<unsigned>(max_subgraph_size_)) ||
+                mvsc.io_weight < mvsc.weight())
                 find_mvsio(mvsc, false, max_io_weight, max_num_in, max_num_out);
             else
                 io_output_->emplace_back(mvsc);
