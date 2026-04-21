@@ -118,6 +118,27 @@ static intset augmented_nodes(const DFG &dfg, const intset &nodes)
     return augmented;
 }
 
+static intset closure_in_graph(const DFG &dfg, const intset &nodes)
+{
+    Subgraph subgraph(dfg, intset(nodes));
+    return subgraph.closure();
+}
+
+static intset dual_closure(const DFG &dfg,
+                           const DFG *alternate_graph,
+                           const intset &nodes)
+{
+    intset closed(nodes);
+    while (true) {
+        intset next = closure_in_graph(dfg, closed);
+        if (alternate_graph != nullptr)
+            next.add(closure_in_graph(*alternate_graph, closed));
+        if (next == closed)
+            return next;
+        closed = std::move(next);
+    }
+}
+
 static bool is_weakly_connected_with_inputs(const DFG &dfg,
                                             const IOSubgraph &config)
 {
@@ -128,14 +149,45 @@ static bool is_weakly_connected_with_inputs(const DFG &dfg,
     return is_weakly_connected_subgraph(dfg, nodes);
 }
 
+namespace {
+
+void add_nodes(IOSubgraph &config, const intset &nodes)
+{
+    std::vector<int> added;
+    added.reserve(nodes.size());
+    for (const auto &u : nodes)
+        if (!config.nodes().contains(u))
+            added.push_back(u);
+    for (auto it = added.rbegin(); it != added.rend(); ++it)
+        config.add(*it);
+}
+
+void remove_nodes(IOSubgraph &config, const intset &nodes)
+{
+    for (const auto &u : nodes)
+        if (config.nodes().contains(u))
+            config.remove(u);
+}
+
+}
+
+static intset singleton_set(unsigned size, int node)
+{
+    intset nodes(size);
+    nodes.add(node);
+    return nodes;
+}
+
 class VSFinder {
 public:
     VSFinder(const DFG &dfg,
              const Subgraph &outputs,
+             const DFG *alternate_graph = nullptr,
              int max_subgraph_size = -1,
              bool connected_only = false)
-        : config_(dfg, outputs.closure())
+        : config_(dfg, dual_closure(dfg, alternate_graph, outputs.nodes()))
         , F_(config_exclusion(dfg, outputs.nodes()))
+        , alternate_graph_(alternate_graph)
         , max_subgraph_size_(max_subgraph_size)
         , connected_only_(connected_only)
     {
@@ -147,6 +199,7 @@ public:
 private:
     IOSubgraph config_;
     intset F_;
+    const DFG *alternate_graph_;
     int max_subgraph_size_;
     bool connected_only_;
 };
@@ -220,7 +273,16 @@ void VSFinder::visit(int max_num_in,
             }
             if (id == -1)
                 break;
-            config_.add(id);
+            intset closed = dual_closure(
+                dfg, alternate_graph_, config_.nodes() | singleton_set(config_.nodes().max_size(), id));
+            if (closed.intersects(F_) || closed.intersects(dfg.forbidden()))
+                return;
+            intset added(closed);
+            added.remove(config_.nodes());
+            add_nodes(config_, added);
+            if (max_subgraph_size_ >= 0 &&
+                config_.nodes().size() > static_cast<unsigned>(max_subgraph_size_))
+                return;
         }
 
         for (auto &u : config_.inputs()) {
@@ -258,10 +320,15 @@ void VSFinder::visit(int max_num_in,
         return;
     }
 
-    config_.add(id);
-    visit(max_num_in, output_cb);
-
-    config_.remove(id);
+    intset closed = dual_closure(
+        dfg, alternate_graph_, config_.nodes() | singleton_set(config_.nodes().max_size(), id));
+    if (!closed.intersects(F_) && !closed.intersects(dfg.forbidden())) {
+        intset added(closed);
+        added.remove(config_.nodes());
+        add_nodes(config_, added);
+        visit(max_num_in, output_cb);
+        remove_nodes(config_, added);
+    }
     intset F_prev(F_);
     F_.add(id);
     F_.add(dfg.pred(id));
@@ -271,31 +338,14 @@ void VSFinder::visit(int max_num_in,
 
 namespace {
 
-void add_nodes(IOSubgraph &config, const intset &nodes)
-{
-    std::vector<int> added;
-    added.reserve(nodes.size());
-    for (const auto &u : nodes)
-        if (!config.nodes().contains(u))
-            added.push_back(u);
-    for (auto it = added.rbegin(); it != added.rend(); ++it)
-        config.add(*it);
-}
-
-void remove_nodes(IOSubgraph &config, const intset &nodes)
-{
-    for (const auto &u : nodes)
-        if (config.nodes().contains(u))
-            config.remove(u);
-}
-
 void vs_enumerate_zero_inputs_(const DFG &dfg,
                                const Subgraph &outputs,
                                int max_subgraph_size,
+                               const DFG *alternate_graph,
                                const std::function<void(const IOSubgraph &)> &output_cb,
                                bool connected_only)
 {
-    intset nodes(outputs.closure());
+    intset nodes(dual_closure(dfg, alternate_graph, outputs.nodes()));
     if (max_subgraph_size >= 0 &&
         nodes.size() > static_cast<unsigned>(max_subgraph_size))
         return;
@@ -311,7 +361,12 @@ void vs_enumerate_zero_inputs_(const DFG &dfg,
                 return;
             break;
         }
-        nodes.add(addable);
+        nodes = dual_closure(dfg, alternate_graph, nodes | addable);
+        if (nodes.intersects(F) || nodes.intersects(dfg.forbidden()))
+            return;
+        if (max_subgraph_size >= 0 &&
+            nodes.size() > static_cast<unsigned>(max_subgraph_size))
+            return;
     }
 
     if (connected_only && !is_weakly_connected_subgraph(dfg, nodes))
@@ -454,21 +509,25 @@ private:
 void vs_enumerate_zero_outputs_(const DFG &dfg,
                                 int max_num_in,
                                 int max_subgraph_size,
+                                const DFG *alternate_graph,
                                 const std::function<void(const IOSubgraph &)> &output_cb,
                                 bool connected_only)
 {
-    if (connected_only) {
+    if (connected_only && alternate_graph == nullptr) {
         ZeroOutputConnectedFinder(
             dfg, max_num_in, max_subgraph_size, output_cb).enumerate();
         return;
     }
 
     auto reversed = reverse_dfg(dfg);
+    auto reversed_alternate =
+        alternate_graph != nullptr ? reverse_dfg(*alternate_graph) : nullptr;
     vs_enumerate(
         *reversed,
         0,
         dfg.num_nodes(),
         max_subgraph_size,
+        reversed_alternate.get(),
         [&dfg, max_num_in, max_subgraph_size, connected_only, &output_cb](const IOSubgraph &subgraph) {
             IOSubgraph original_subgraph(dfg);
             original_subgraph.set(subgraph.nodes());
@@ -477,11 +536,11 @@ void vs_enumerate_zero_outputs_(const DFG &dfg,
                 original_subgraph.num_out() == 0 &&
                 original_subgraph.num_in() <= max_num_in &&
                 (!connected_only ||
-                 is_weakly_connected_subgraph(dfg, original_subgraph.nodes()))) {
+                 is_weakly_connected_with_inputs(dfg, original_subgraph))) {
                 output_cb(original_subgraph);
             }
         },
-        connected_only);
+        false);
 }
 
 void vs_enumerate_(const DFG &dfg,
@@ -490,20 +549,22 @@ void vs_enumerate_(const DFG &dfg,
                    int max_num_in,
                    int max_num_out,
                    int max_subgraph_size,
+                   const DFG *alternate_graph,
                    const std::function<void(const IOSubgraph &)> &output_cb,
                    bool connected_only)
 {
     if (max_subgraph_size >= 0 &&
-        outputs.closure().size() > static_cast<unsigned>(max_subgraph_size))
+        dual_closure(dfg, alternate_graph, outputs.nodes()).size() >
+            static_cast<unsigned>(max_subgraph_size))
         return;
 
     if (size >= 1) {
         if (max_num_in == 0) {
             vs_enumerate_zero_inputs_(
-                dfg, outputs, max_subgraph_size, output_cb, connected_only);
+                dfg, outputs, max_subgraph_size, alternate_graph, output_cb, connected_only);
         } else {
             VSFinder finder(
-                dfg, outputs, max_subgraph_size, connected_only);
+                dfg, outputs, alternate_graph, max_subgraph_size, connected_only);
             finder.visit(max_num_in, output_cb);
         }
     }
@@ -529,6 +590,7 @@ void vs_enumerate_(const DFG &dfg,
                               max_num_in,
                               max_num_out,
                               max_subgraph_size,
+                              alternate_graph,
                               output_cb,
                               connected_only);
                 outputs.remove(u);
@@ -543,12 +605,13 @@ void vs_enumerate(const DFG &dfg,
                   int max_num_in,
                   int max_num_out,
                   int max_subgraph_size,
+                  const DFG *alternate_graph,
                   const std::function<void(const IOSubgraph &)> &output_cb,
                   bool connected_only)
 {
     if (max_num_out == 0) {
         vs_enumerate_zero_outputs_(
-            dfg, max_num_in, max_subgraph_size, output_cb, connected_only);
+            dfg, max_num_in, max_subgraph_size, alternate_graph, output_cb, connected_only);
         return;
     }
 
@@ -560,6 +623,7 @@ void vs_enumerate(const DFG &dfg,
         max_num_in,
         max_num_out,
         max_subgraph_size,
+        alternate_graph,
         output_cb,
         connected_only);
 }

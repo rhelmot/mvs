@@ -76,6 +76,7 @@ int main(int argc, char *argv[])
                  max_num_in,
                  max_num_out,
                  -1,
+                 nullptr,
                  [&max_weight, &output, enum_all](const IOSubgraph &subgraph) {
                      double weight = subgraph.weight();
                      if (enum_all || weight >= max_weight) {

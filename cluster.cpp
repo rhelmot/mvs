@@ -23,7 +23,7 @@ std::vector<SCluster> scluster_enumerate(const DFG &dfg)
 {
     std::vector<SCluster> output;
     std::vector<IOSubgraph> subgraphs;
-    vs_enumerate(dfg, 1, 1, -1, [&subgraphs](const IOSubgraph &subgraph) {
+    vs_enumerate(dfg, 1, 1, -1, nullptr, [&subgraphs](const IOSubgraph &subgraph) {
         if (subgraph.nodes().size() == 1)
             return;
         for (auto it = subgraphs.begin(); it != subgraphs.end();) {
