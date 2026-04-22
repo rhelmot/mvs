@@ -16,6 +16,7 @@
 #include "vs.h"
 #include "dfg.h"
 #include <cassert>
+#include <deque>
 #include <functional>
 #include <tuple>
 #include <unordered_map>
@@ -589,6 +590,361 @@ private:
     std::unordered_set<SearchState, SearchStateHash> visited_states_;
 };
 
+class SampledZeroOutputConnectedFinder {
+public:
+    SampledZeroOutputConnectedFinder(const DFG &dfg,
+                                     int max_num_in,
+                                     int max_subgraph_size,
+                                     const std::function<void(const IOSubgraph &)> &output_cb,
+                                     const DFG *alternate_graph,
+                                     int max_states_expanded,
+                                     int max_samples,
+                                     int max_children_per_state,
+                                     int size_bin_width)
+        : dfg_(dfg)
+        , max_num_in_(max_num_in)
+        , max_subgraph_size_(max_subgraph_size)
+        , output_cb_(output_cb)
+        , alternate_graph_(alternate_graph)
+        , max_states_expanded_(max_states_expanded)
+        , max_samples_(max_samples)
+        , max_children_per_state_(max_children_per_state)
+        , size_bin_width_(size_bin_width)
+        , forbidden_(dfg.forbidden())
+        , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , augmented_closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , neighborhoods_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , valid_(dfg.num_nodes(), false)
+        , sample_count_by_bin_(num_bins(), 0)
+    {
+        for (int u = 0; u < dfg_.num_nodes(); u++) {
+            closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
+            augmented_closures_[u] = augmented_nodes(dfg_, closures_[u]);
+            neighborhoods_[u] = augmented_closures_[u];
+            for (const auto &v : augmented_closures_[u]) {
+                for (const auto &w : dfg_.in_edges(v))
+                    neighborhoods_[u].add(w);
+                for (const auto &w : dfg_.out_edges(v))
+                    neighborhoods_[u].add(w);
+            }
+            valid_[u] = !closures_[u].intersects(forbidden_);
+        }
+    }
+
+    void enumerate()
+    {
+        if (max_states_expanded_ <= 0 || max_samples_ <= 0)
+            return;
+
+        for (int root = 0; root < dfg_.num_nodes(); root++) {
+            if (!valid_[root])
+                continue;
+
+            SearchState root_state(
+                intset(closures_[root]),
+                intset(dfg_.num_nodes()),
+                intset(dfg_.num_nodes()));
+            root_state.blocked.add(root);
+            root_state.blocked.add(dfg_.pred(root));
+            root_state.blocked.add(dfg_.succ(root));
+
+            intset current_augmented = augmented_nodes(dfg_, root_state.nodes);
+            for (int u = root + 1; u < dfg_.num_nodes(); u++) {
+                if (!valid_[u] || root_state.blocked.contains(u))
+                    continue;
+                if (closures_[u].is_subset_of(root_state.nodes))
+                    continue;
+                if (neighborhoods_[u].intersects(current_augmented))
+                    root_state.frontier.add(u);
+            }
+
+            enqueue_if_new(std::move(root_state));
+        }
+
+        while (!agenda_.empty() && states_expanded_ < max_states_expanded_ &&
+               samples_emitted_ < max_samples_) {
+            SearchState current(std::move(agenda_.front()));
+            agenda_.pop_front();
+            maybe_emit(current.nodes);
+            expand_with_contraction(std::move(current));
+        }
+    }
+
+private:
+    struct SearchState {
+        intset nodes;
+        intset frontier;
+        intset blocked;
+
+        SearchState(intset nodes_, intset frontier_, intset blocked_)
+            : nodes(std::move(nodes_))
+            , frontier(std::move(frontier_))
+            , blocked(std::move(blocked_))
+        {
+        }
+
+        SearchState(const SearchState &) = default;
+        SearchState(SearchState &&) noexcept = default;
+        SearchState &operator=(const SearchState &) = default;
+        SearchState &operator=(SearchState &&) noexcept = default;
+    };
+
+    struct Candidate {
+        SearchState state;
+        unsigned delta_size;
+        unsigned size_bin;
+        unsigned current_sample_count;
+        int first_added;
+
+        Candidate(SearchState state_,
+                  unsigned delta_size_,
+                  unsigned size_bin_,
+                  unsigned current_sample_count_,
+                  int first_added_)
+            : state(std::move(state_))
+            , delta_size(delta_size_)
+            , size_bin(size_bin_)
+            , current_sample_count(current_sample_count_)
+            , first_added(first_added_)
+        {
+        }
+
+        Candidate(const Candidate &) = default;
+        Candidate(Candidate &&) noexcept = default;
+        Candidate &operator=(const Candidate &) = default;
+        Candidate &operator=(Candidate &&) noexcept = default;
+    };
+
+    using SearchStateKey = std::tuple<intset, intset, intset>;
+
+    const intset &closure_for(const intset &nodes)
+    {
+        auto it = closure_cache_.find(nodes);
+        if (it != closure_cache_.end())
+            return it->second;
+        return closure_cache_
+            .emplace(intset(nodes), zero_output_closure(dfg_, alternate_graph_, nodes))
+            .first->second;
+    }
+
+    unsigned num_bins() const
+    {
+        unsigned limit =
+            max_subgraph_size_ >= 0 ? static_cast<unsigned>(max_subgraph_size_) :
+                                      static_cast<unsigned>(dfg_.num_nodes());
+        return limit / static_cast<unsigned>(size_bin_width_) + 2;
+    }
+
+    unsigned size_bin(unsigned size) const
+    {
+        return size / static_cast<unsigned>(size_bin_width_);
+    }
+
+    void maybe_emit(const intset &nodes)
+    {
+        if (samples_emitted_ >= max_samples_)
+            return;
+
+        IOSubgraph config(dfg_, intset(nodes));
+        if (max_subgraph_size_ >= 0 &&
+            config.nodes().size() > static_cast<unsigned>(max_subgraph_size_))
+            return;
+        if (config.num_in() > max_num_in_ || config.num_out() != 0)
+            return;
+        if (!is_weakly_connected_with_inputs(dfg_, config))
+            return;
+        if (!emitted_.insert(intset(config.nodes())).second)
+            return;
+
+        output_cb_(config);
+        samples_emitted_++;
+        sample_count_by_bin_[size_bin(config.nodes().size())]++;
+    }
+
+    void enqueue_if_new(SearchState state)
+    {
+        SearchStateKey key(intset(state.nodes), intset(state.frontier), intset(state.blocked));
+        if (!visited_states_.insert(std::move(key)).second)
+            return;
+        agenda_.push_back(std::move(state));
+    }
+
+    std::vector<Candidate> build_candidates(const SearchState &state)
+    {
+        std::vector<Candidate> candidates;
+        intset frontier_remaining(state.frontier);
+
+        while (true) {
+            int next = frontier_remaining.minimum();
+            if (next == static_cast<unsigned>(-1))
+                break;
+            frontier_remaining.remove(next);
+
+            intset blocked_next(state.blocked);
+            blocked_next.add(next);
+            blocked_next.add(dfg_.pred(next));
+            blocked_next.add(dfg_.succ(next));
+
+            intset seed(state.nodes | singleton_set(dfg_.num_nodes(), next));
+            intset closed = closure_for(seed);
+            if (closed.intersects(forbidden_))
+                continue;
+
+            intset added(closed);
+            added.remove(state.nodes);
+            int first_added = static_cast<int>(added.minimum());
+            if (first_added == -1)
+                continue;
+
+            IOSubgraph config(dfg_, intset(closed));
+            if (max_subgraph_size_ >= 0 &&
+                config.nodes().size() > static_cast<unsigned>(max_subgraph_size_))
+                continue;
+            if (config.num_in() > max_num_in_ || config.num_out() != 0)
+                continue;
+
+            intset frontier_next(frontier_remaining);
+            intset current_augmented = augmented_nodes(dfg_, config.nodes());
+            for (int u = next + 1; u < dfg_.num_nodes(); u++) {
+                if (!valid_[u] || blocked_next.contains(u) || frontier_next.contains(u))
+                    continue;
+                if (closures_[u].is_subset_of(config.nodes()))
+                    continue;
+                if (neighborhoods_[u].intersects(current_augmented))
+                    frontier_next.add(u);
+            }
+
+            candidates.emplace_back(
+                SearchState(intset(closed), std::move(frontier_next), std::move(blocked_next)),
+                added.size(),
+                size_bin(config.nodes().size()),
+                sample_count_by_bin_[size_bin(config.nodes().size())],
+                first_added);
+        }
+
+        return candidates;
+    }
+
+    std::vector<Candidate> select_candidates(std::vector<Candidate> candidates) const
+    {
+        std::unordered_map<unsigned, std::size_t> best_by_bin;
+        std::vector<Candidate> clustered;
+        clustered.reserve(candidates.size());
+
+        for (auto &candidate : candidates) {
+            auto it = best_by_bin.find(candidate.size_bin);
+            if (it == best_by_bin.end()) {
+                best_by_bin.emplace(candidate.size_bin, clustered.size());
+                clustered.push_back(std::move(candidate));
+                continue;
+            }
+
+            Candidate &current = clustered[it->second];
+            if (candidate.current_sample_count < current.current_sample_count ||
+                (candidate.current_sample_count == current.current_sample_count &&
+                 candidate.delta_size > current.delta_size) ||
+                (candidate.current_sample_count == current.current_sample_count &&
+                 candidate.delta_size == current.delta_size &&
+                 candidate.first_added < current.first_added)) {
+                current = std::move(candidate);
+            }
+        }
+
+        std::sort(
+            clustered.begin(),
+            clustered.end(),
+            [](const Candidate &lhs, const Candidate &rhs) {
+                if (lhs.current_sample_count != rhs.current_sample_count)
+                    return lhs.current_sample_count < rhs.current_sample_count;
+                if (lhs.delta_size != rhs.delta_size)
+                    return lhs.delta_size > rhs.delta_size;
+                if (lhs.state.nodes.size() != rhs.state.nodes.size())
+                    return lhs.state.nodes.size() < rhs.state.nodes.size();
+                return lhs.first_added < rhs.first_added;
+            });
+
+        if (clustered.size() > static_cast<std::size_t>(max_children_per_state_)) {
+            clustered.erase(
+                clustered.begin() + static_cast<std::ptrdiff_t>(max_children_per_state_),
+                clustered.end());
+        }
+        return clustered;
+    }
+
+    void expand_with_contraction(SearchState state)
+    {
+        while (states_expanded_ < max_states_expanded_ &&
+               samples_emitted_ < max_samples_) {
+            states_expanded_++;
+
+            auto candidates = select_candidates(build_candidates(state));
+            if (candidates.empty())
+                return;
+
+            for (auto &candidate : candidates)
+                maybe_emit(candidate.state.nodes);
+
+            if (samples_emitted_ >= max_samples_)
+                return;
+
+            if (candidates.size() == 1) {
+                state = std::move(candidates.front().state);
+                continue;
+            }
+
+            for (auto &candidate : candidates)
+                enqueue_if_new(std::move(candidate.state));
+            return;
+        }
+    }
+
+    const DFG &dfg_;
+    int max_num_in_;
+    int max_subgraph_size_;
+    const std::function<void(const IOSubgraph &)> &output_cb_;
+    const DFG *alternate_graph_;
+    int max_states_expanded_;
+    int max_samples_;
+    int max_children_per_state_;
+    int size_bin_width_;
+    intset forbidden_;
+    std::vector<intset> closures_;
+    std::vector<intset> augmented_closures_;
+    std::vector<intset> neighborhoods_;
+    std::vector<bool> valid_;
+    std::unordered_map<intset, intset, IntsetHash> closure_cache_;
+    std::unordered_set<intset, IntsetHash> emitted_;
+    std::unordered_set<SearchStateKey, SearchStateHash> visited_states_;
+    std::deque<SearchState> agenda_;
+    std::vector<unsigned> sample_count_by_bin_;
+    int states_expanded_ = 0;
+    int samples_emitted_ = 0;
+};
+
+void vs_sample_zero_output_connected_(
+    const DFG &dfg,
+    int max_num_in,
+    int max_subgraph_size,
+    const DFG *alternate_graph,
+    const std::function<void(const IOSubgraph &)> &output_cb,
+    int max_states_expanded,
+    int max_samples,
+    int max_children_per_state,
+    int size_bin_width)
+{
+    SampledZeroOutputConnectedFinder(
+        dfg,
+        max_num_in,
+        max_subgraph_size,
+        output_cb,
+        alternate_graph,
+        max_states_expanded,
+        max_samples,
+        max_children_per_state,
+        size_bin_width)
+        .enumerate();
+}
+
 void vs_enumerate_zero_outputs_(const DFG &dfg,
                                 int max_num_in,
                                 int max_subgraph_size,
@@ -691,6 +1047,29 @@ void vs_enumerate_(const DFG &dfg,
     }
 }
 
+}
+
+void vs_sample_zero_output_connected(
+    const DFG &dfg,
+    int max_num_in,
+    int max_subgraph_size,
+    const DFG *alternate_graph,
+    const std::function<void(const IOSubgraph &)> &output_cb,
+    int max_states_expanded,
+    int max_samples,
+    int max_children_per_state,
+    int size_bin_width)
+{
+    vs_sample_zero_output_connected_(
+        dfg,
+        max_num_in,
+        max_subgraph_size,
+        alternate_graph,
+        output_cb,
+        max_states_expanded,
+        max_samples,
+        max_children_per_state,
+        size_bin_width);
 }
 
 void vs_enumerate(const DFG &dfg,
