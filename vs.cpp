@@ -17,7 +17,9 @@
 #include "dfg.h"
 #include <cassert>
 #include <functional>
-#include <set>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 static const bool VERIFY = false;
@@ -125,15 +127,6 @@ static intset closure_in_graph(const DFG &dfg, const intset &nodes)
     return subgraph.closure();
 }
 
-static std::vector<int> nodes_key(const intset &nodes)
-{
-    std::vector<int> key;
-    key.reserve(nodes.size());
-    for (const auto &u : nodes)
-        key.push_back(u);
-    return key;
-}
-
 static bool is_convex_in_graph(const DFG &dfg, const intset &nodes)
 {
     return closure_in_graph(dfg, nodes) == nodes;
@@ -182,6 +175,30 @@ static bool is_weakly_connected_with_inputs(const DFG &dfg,
 }
 
 namespace {
+
+template <class T>
+inline void hash_combine(std::size_t &seed, const T &value)
+{
+    seed ^= std::hash<T>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+struct IntsetHash {
+    std::size_t operator()(const intset &values) const
+    {
+        return values.hash();
+    }
+};
+
+struct SearchStateHash {
+    std::size_t operator()(const std::tuple<intset, intset, intset> &state) const
+    {
+        const auto &[nodes, frontier, blocked] = state;
+        std::size_t seed = IntsetHash{}(nodes);
+        hash_combine(seed, IntsetHash{}(frontier));
+        hash_combine(seed, IntsetHash{}(blocked));
+        return seed;
+    }
+};
 
 void add_nodes(IOSubgraph &config, const intset &nodes)
 {
@@ -434,10 +451,7 @@ public:
         , valid_(dfg.num_nodes(), false)
     {
         for (int u = 0; u < dfg_.num_nodes(); u++) {
-            closures_[u] = zero_output_closure(
-                dfg_,
-                alternate_graph_,
-                singleton_set(dfg_.num_nodes(), u));
+            closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
             augmented_closures_[u] = augmented_nodes(dfg_, closures_[u]);
             neighborhoods_[u] = augmented_closures_[u];
             for (const auto &v : augmented_closures_[u]) {
@@ -486,14 +500,30 @@ public:
     }
 
 private:
+    using SearchState = std::tuple<intset, intset, intset>;
+
+    const intset &closure_for(const intset &nodes)
+    {
+        auto it = closure_cache_.find(nodes);
+        if (it != closure_cache_.end())
+            return it->second;
+        return closure_cache_
+            .emplace(intset(nodes), zero_output_closure(dfg_, alternate_graph_, nodes))
+            .first->second;
+    }
+
     void emit(const IOSubgraph &config)
     {
-        if (emitted_.insert(nodes_key(config.nodes())).second)
+        if (emitted_.insert(intset(config.nodes())).second)
             output_cb_(config);
     }
 
     void visit(intset &frontier, const intset &blocked)
     {
+        SearchState state(config_.nodes(), frontier, blocked);
+        if (!visited_states_.insert(std::move(state)).second)
+            return;
+
         while (true) {
             int next = frontier.minimum();
             if (next == static_cast<unsigned>(-1))
@@ -506,10 +536,8 @@ private:
             blocked_next.add(dfg_.pred(next));
             blocked_next.add(dfg_.succ(next));
 
-            intset closed = zero_output_closure(
-                dfg_,
-                alternate_graph_,
-                config_.nodes() | singleton_set(dfg_.num_nodes(), next));
+            intset seed(config_.nodes() | singleton_set(dfg_.num_nodes(), next));
+            intset closed = closure_for(seed);
             if (closed.intersects(forbidden_))
                 continue;
 
@@ -556,7 +584,9 @@ private:
     std::vector<intset> augmented_closures_;
     std::vector<intset> neighborhoods_;
     std::vector<bool> valid_;
-    std::set<std::vector<int>> emitted_;
+    std::unordered_map<intset, intset, IntsetHash> closure_cache_;
+    std::unordered_set<intset, IntsetHash> emitted_;
+    std::unordered_set<SearchState, SearchStateHash> visited_states_;
 };
 
 void vs_enumerate_zero_outputs_(const DFG &dfg,

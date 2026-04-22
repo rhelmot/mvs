@@ -26,6 +26,8 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
+#include <functional>
 #include <limits>
 #include <memory>
 
@@ -38,7 +40,7 @@ private:
     static block bit_mask(unsigned n) { return block(1) << bit_index(n); }
 
     std::unique_ptr<block[]> data_;
-    unsigned num_bits_;
+    unsigned num_bits_ = 0;
 
     unsigned num_blocks() const
     {
@@ -75,15 +77,17 @@ public:
     }
 
     intset(intset &&s) noexcept
+        : data_(std::move(s.data_))
+        , num_bits_(s.num_bits_)
     {
-        data_.swap(s.data_);
-        std::swap(num_bits_, s.num_bits_);
+        s.num_bits_ = 0;
     }
 
     intset &operator=(intset &&s) noexcept
     {
-        data_.swap(s.data_);
-        std::swap(num_bits_, s.num_bits_);
+        data_ = std::move(s.data_);
+        num_bits_ = s.num_bits_;
+        s.num_bits_ = 0;
         return *this;
     }
 
@@ -100,6 +104,16 @@ public:
             if (s.data_[i])
                 return false;
         return true;
+    }
+
+    std::size_t hash() const
+    {
+        std::size_t seed = num_bits_;
+        for (unsigned i = 0; i < num_blocks(); i++) {
+            seed ^= std::hash<block>{}(data_[i]) + 0x9e3779b9 + (seed << 6) +
+                (seed >> 2);
+        }
+        return seed;
     }
 
     intset &add(unsigned n)
