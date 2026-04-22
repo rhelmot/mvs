@@ -17,6 +17,7 @@
 #include "dfg.h"
 #include <cassert>
 #include <functional>
+#include <set>
 #include <vector>
 
 static const bool VERIFY = false;
@@ -124,6 +125,15 @@ static intset closure_in_graph(const DFG &dfg, const intset &nodes)
     return subgraph.closure();
 }
 
+static std::vector<int> nodes_key(const intset &nodes)
+{
+    std::vector<int> key;
+    key.reserve(nodes.size());
+    for (const auto &u : nodes)
+        key.push_back(u);
+    return key;
+}
+
 static bool is_convex_in_graph(const DFG &dfg, const intset &nodes)
 {
     return closure_in_graph(dfg, nodes) == nodes;
@@ -138,6 +148,23 @@ static intset dual_closure(const DFG &dfg,
         intset next = closure_in_graph(dfg, closed);
         if (alternate_graph != nullptr)
             next.add(closure_in_graph(*alternate_graph, closed));
+        if (next == closed)
+            return next;
+        closed = std::move(next);
+    }
+}
+
+static intset zero_output_closure(const DFG &dfg,
+                                  const DFG *alternate_graph,
+                                  const intset &nodes)
+{
+    intset closed(nodes);
+    while (true) {
+        intset next(closed);
+        for (const auto &u : closed)
+            next.add(dfg.succ(u));
+        if (alternate_graph != nullptr)
+            next = dual_closure(dfg, alternate_graph, next);
         if (next == closed)
             return next;
         closed = std::move(next);
@@ -392,11 +419,13 @@ public:
     ZeroOutputConnectedFinder(const DFG &dfg,
                               int max_num_in,
                               int max_subgraph_size,
-                              const std::function<void(const IOSubgraph &)> &output_cb)
+                              const std::function<void(const IOSubgraph &)> &output_cb,
+                              const DFG *alternate_graph = nullptr)
         : dfg_(dfg)
         , max_num_in_(max_num_in)
         , max_subgraph_size_(max_subgraph_size)
         , output_cb_(output_cb)
+        , alternate_graph_(alternate_graph)
         , config_(dfg)
         , forbidden_(dfg.forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
@@ -405,8 +434,10 @@ public:
         , valid_(dfg.num_nodes(), false)
     {
         for (int u = 0; u < dfg_.num_nodes(); u++) {
-            closures_[u].add(u);
-            closures_[u].add(dfg_.succ(u));
+            closures_[u] = zero_output_closure(
+                dfg_,
+                alternate_graph_,
+                singleton_set(dfg_.num_nodes(), u));
             augmented_closures_[u] = augmented_nodes(dfg_, closures_[u]);
             neighborhoods_[u] = augmented_closures_[u];
             for (const auto &v : augmented_closures_[u]) {
@@ -429,8 +460,9 @@ public:
             if ((max_subgraph_size_ < 0 ||
                  config_.nodes().size() <= static_cast<unsigned>(max_subgraph_size_)) &&
                 config_.num_in() <= max_num_in_ &&
+                config_.num_out() == 0 &&
                 is_weakly_connected_with_inputs(dfg_, config_))
-                output_cb_(config_);
+                emit(config_);
 
             intset blocked(dfg_.num_nodes());
             blocked.add(root);
@@ -454,6 +486,12 @@ public:
     }
 
 private:
+    void emit(const IOSubgraph &config)
+    {
+        if (emitted_.insert(nodes_key(config.nodes())).second)
+            output_cb_(config);
+    }
+
     void visit(intset &frontier, const intset &blocked)
     {
         while (true) {
@@ -468,7 +506,14 @@ private:
             blocked_next.add(dfg_.pred(next));
             blocked_next.add(dfg_.succ(next));
 
-            intset added(closures_[next]);
+            intset closed = zero_output_closure(
+                dfg_,
+                alternate_graph_,
+                config_.nodes() | singleton_set(dfg_.num_nodes(), next));
+            if (closed.intersects(forbidden_))
+                continue;
+
+            intset added(closed);
             added.remove(config_.nodes());
             if (added.minimum() == static_cast<unsigned>(-1))
                 continue;
@@ -476,9 +521,10 @@ private:
 
             if ((max_subgraph_size_ < 0 ||
                  config_.nodes().size() <= static_cast<unsigned>(max_subgraph_size_)) &&
-                config_.num_in() <= max_num_in_) {
+                config_.num_in() <= max_num_in_ &&
+                config_.num_out() == 0) {
                 if (is_weakly_connected_with_inputs(dfg_, config_))
-                    output_cb_(config_);
+                    emit(config_);
 
                 intset frontier_next(frontier);
                 intset current_augmented = augmented_nodes(dfg_, config_.nodes());
@@ -503,12 +549,14 @@ private:
     int max_num_in_;
     int max_subgraph_size_;
     const std::function<void(const IOSubgraph &)> &output_cb_;
+    const DFG *alternate_graph_;
     IOSubgraph config_;
     intset forbidden_;
     std::vector<intset> closures_;
     std::vector<intset> augmented_closures_;
     std::vector<intset> neighborhoods_;
     std::vector<bool> valid_;
+    std::set<std::vector<int>> emitted_;
 };
 
 void vs_enumerate_zero_outputs_(const DFG &dfg,
@@ -528,12 +576,8 @@ void vs_enumerate_zero_outputs_(const DFG &dfg,
             dfg,
             max_num_in,
             max_subgraph_size,
-            [&output_cb, alternate_graph](const IOSubgraph &subgraph) {
-                if (alternate_graph == nullptr ||
-                    is_convex_in_graph(*alternate_graph, subgraph.nodes())) {
-                    output_cb(subgraph);
-                }
-            }).enumerate();
+            output_cb,
+            alternate_graph).enumerate();
         return;
     }
 
