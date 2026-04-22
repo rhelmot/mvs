@@ -124,6 +124,11 @@ static intset closure_in_graph(const DFG &dfg, const intset &nodes)
     return subgraph.closure();
 }
 
+static bool is_convex_in_graph(const DFG &dfg, const intset &nodes)
+{
+    return closure_in_graph(dfg, nodes) == nodes;
+}
+
 static intset dual_closure(const DFG &dfg,
                            const DFG *alternate_graph,
                            const intset &nodes)
@@ -516,6 +521,19 @@ void vs_enumerate_zero_outputs_(const DFG &dfg,
     if (connected_only && alternate_graph == nullptr) {
         ZeroOutputConnectedFinder(
             dfg, max_num_in, max_subgraph_size, output_cb).enumerate();
+        return;
+    }
+    if (connected_only) {
+        ZeroOutputConnectedFinder(
+            dfg,
+            max_num_in,
+            max_subgraph_size,
+            [&output_cb, alternate_graph](const IOSubgraph &subgraph) {
+                if (alternate_graph == nullptr ||
+                    is_convex_in_graph(*alternate_graph, subgraph.nodes())) {
+                    output_cb(subgraph);
+                }
+            }).enumerate();
         return;
     }
 
