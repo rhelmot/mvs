@@ -20,3 +20,11 @@ void vs_sample_zero_output_connected(
     int max_samples,
     int max_children_per_state,
     int size_bin_width);
+
+void vs_grow_zero_output_connected(
+    const DFG &dfg,
+    const intset &seed,
+    int max_num_in,
+    int max_subgraph_size,
+    const DFG *alternate_graph,
+    const std::function<bool(const IOSubgraph &)> &visit_cb);

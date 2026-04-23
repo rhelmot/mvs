@@ -945,6 +945,135 @@ void vs_sample_zero_output_connected_(
         .enumerate();
 }
 
+class ZeroOutputGrower {
+public:
+    ZeroOutputGrower(const DFG &dfg,
+                     int max_num_in,
+                     int max_subgraph_size,
+                     const DFG *alternate_graph,
+                     const std::function<bool(const IOSubgraph &)> &visit_cb)
+        : dfg_(dfg)
+        , max_num_in_(max_num_in)
+        , max_subgraph_size_(max_subgraph_size)
+        , alternate_graph_(alternate_graph)
+        , visit_cb_(visit_cb)
+        , forbidden_(dfg.forbidden())
+        , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , neighborhoods_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , valid_(dfg.num_nodes(), false)
+    {
+        for (int u = 0; u < dfg_.num_nodes(); u++) {
+            closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
+            intset augmented = augmented_nodes(dfg_, closures_[u]);
+            neighborhoods_[u] = augmented;
+            for (const auto &v : augmented) {
+                for (const auto &w : dfg_.in_edges(v))
+                    neighborhoods_[u].add(w);
+                for (const auto &w : dfg_.out_edges(v))
+                    neighborhoods_[u].add(w);
+            }
+            valid_[u] = !closures_[u].intersects(forbidden_);
+        }
+    }
+
+    void enumerate(const intset &seed)
+    {
+        intset canonical_seed = closure_for(seed);
+        if (!(canonical_seed == seed))
+            throw std::invalid_argument(
+                "seed must already be a canonical dual-convex zero-output subgraph");
+        if (!is_valid_state(seed))
+            throw std::invalid_argument(
+                "seed does not satisfy the zero-output growth constraints");
+
+        std::vector<intset> stack;
+        stack.push_back(seed);
+        seen_.insert(intset(seed));
+
+        while (!stack.empty()) {
+            intset current(std::move(stack.back()));
+            stack.pop_back();
+
+            IOSubgraph config(dfg_, intset(current));
+            if (!visit_cb_(config))
+                continue;
+
+            intset current_augmented = augmented_nodes(dfg_, current);
+            std::vector<intset> next_states;
+            std::unordered_set<intset, IntsetHash> sibling_seen;
+
+            for (int u = 0; u < dfg_.num_nodes(); u++) {
+                if (!valid_[u])
+                    continue;
+                if (closures_[u].is_subset_of(current))
+                    continue;
+                if (!neighborhoods_[u].intersects(current_augmented))
+                    continue;
+
+                intset next_state = closure_for(
+                    current | singleton_set(dfg_.num_nodes(), u));
+                if (next_state == current)
+                    continue;
+                if (!is_valid_state(next_state))
+                    continue;
+                if (!sibling_seen.insert(intset(next_state)).second)
+                    continue;
+                if (!seen_.insert(intset(next_state)).second)
+                    continue;
+                next_states.push_back(std::move(next_state));
+            }
+
+            std::sort(
+                next_states.begin(),
+                next_states.end(),
+                [](const intset &lhs, const intset &rhs) {
+                    if (lhs.size() != rhs.size())
+                        return lhs.size() > rhs.size();
+                    return lhs.minimum() > rhs.minimum();
+                });
+
+            for (auto &next_state : next_states)
+                stack.push_back(std::move(next_state));
+        }
+    }
+
+private:
+    const intset &closure_for(const intset &nodes)
+    {
+        auto it = closure_cache_.find(nodes);
+        if (it != closure_cache_.end())
+            return it->second;
+        return closure_cache_
+            .emplace(intset(nodes), zero_output_closure(dfg_, alternate_graph_, nodes))
+            .first->second;
+    }
+
+    bool is_valid_state(const intset &nodes) const
+    {
+        if (nodes.intersects(forbidden_))
+            return false;
+        IOSubgraph config(dfg_, intset(nodes));
+        if (max_subgraph_size_ >= 0 &&
+            config.nodes().size() > static_cast<unsigned>(max_subgraph_size_))
+            return false;
+        if (config.num_in() > max_num_in_ || config.num_out() != 0)
+            return false;
+        return is_weakly_connected_with_inputs(dfg_, config);
+    }
+
+    const DFG &dfg_;
+    int max_num_in_;
+    int max_subgraph_size_;
+    const DFG *alternate_graph_;
+    const std::function<bool(const IOSubgraph &)> &visit_cb_;
+    intset forbidden_;
+    std::vector<intset> closures_;
+    std::vector<intset> neighborhoods_;
+    std::vector<bool> valid_;
+    std::unordered_map<intset, intset, IntsetHash> closure_cache_;
+    std::unordered_set<intset, IntsetHash> seen_;
+};
+
 void vs_enumerate_zero_outputs_(const DFG &dfg,
                                 int max_num_in,
                                 int max_subgraph_size,
@@ -1070,6 +1199,23 @@ void vs_sample_zero_output_connected(
         max_samples,
         max_children_per_state,
         size_bin_width);
+}
+
+void vs_grow_zero_output_connected(
+    const DFG &dfg,
+    const intset &seed,
+    int max_num_in,
+    int max_subgraph_size,
+    const DFG *alternate_graph,
+    const std::function<bool(const IOSubgraph &)> &visit_cb)
+{
+    ZeroOutputGrower(
+        dfg,
+        max_num_in,
+        max_subgraph_size,
+        alternate_graph,
+        visit_cb)
+        .enumerate(seed);
 }
 
 void vs_enumerate(const DFG &dfg,
