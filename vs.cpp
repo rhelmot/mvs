@@ -201,6 +201,18 @@ struct SearchStateHash {
     }
 };
 
+struct BucketKeyHash {
+    std::size_t operator()(
+        const std::tuple<unsigned, unsigned, unsigned> &bucket) const
+    {
+        const auto &[size_bin, num_inputs, minimal_nodes_bin] = bucket;
+        std::size_t seed = std::hash<unsigned>{}(size_bin);
+        hash_combine(seed, num_inputs);
+        hash_combine(seed, minimal_nodes_bin);
+        return seed;
+    }
+};
+
 void add_nodes(IOSubgraph &config, const intset &nodes)
 {
     std::vector<int> added;
@@ -600,7 +612,10 @@ public:
                                      int max_states_expanded,
                                      int max_samples,
                                      int max_children_per_state,
-                                     int size_bin_width)
+                                     int size_bin_width,
+                                     int thicken_radius,
+                                     bool bucket_by_num_inputs,
+                                     int minimal_node_bin_width)
         : dfg_(dfg)
         , max_num_in_(max_num_in)
         , max_subgraph_size_(max_subgraph_size)
@@ -610,12 +625,14 @@ public:
         , max_samples_(max_samples)
         , max_children_per_state_(max_children_per_state)
         , size_bin_width_(size_bin_width)
+        , thicken_radius_(thicken_radius)
+        , bucket_by_num_inputs_(bucket_by_num_inputs)
+        , minimal_node_bin_width_(minimal_node_bin_width)
         , forbidden_(dfg.forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , augmented_closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , neighborhoods_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , valid_(dfg.num_nodes(), false)
-        , sample_count_by_bin_(num_bins(), 0)
     {
         for (int u = 0; u < dfg_.num_nodes(); u++) {
             closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
@@ -692,19 +709,19 @@ private:
     struct Candidate {
         SearchState state;
         unsigned delta_size;
-        unsigned size_bin;
-        unsigned current_sample_count;
+        std::tuple<unsigned, unsigned, unsigned> bucket_key;
+        unsigned current_bucket_count;
         int first_added;
 
         Candidate(SearchState state_,
                   unsigned delta_size_,
-                  unsigned size_bin_,
-                  unsigned current_sample_count_,
+                  std::tuple<unsigned, unsigned, unsigned> bucket_key_,
+                  unsigned current_bucket_count_,
                   int first_added_)
             : state(std::move(state_))
             , delta_size(delta_size_)
-            , size_bin(size_bin_)
-            , current_sample_count(current_sample_count_)
+            , bucket_key(std::move(bucket_key_))
+            , current_bucket_count(current_bucket_count_)
             , first_added(first_added_)
         {
         }
@@ -740,6 +757,26 @@ private:
         return size / static_cast<unsigned>(size_bin_width_);
     }
 
+    unsigned minimal_nodes_bin(const intset &nodes) const
+    {
+        if (minimal_node_bin_width_ <= 0)
+            return 0;
+
+        unsigned minimal_nodes = 0;
+        for (const auto &u : nodes)
+            if (!dfg_.pred(u).intersects(nodes))
+                minimal_nodes++;
+        return minimal_nodes / static_cast<unsigned>(minimal_node_bin_width_);
+    }
+
+    std::tuple<unsigned, unsigned, unsigned> bucket_key(const IOSubgraph &config) const
+    {
+        return std::make_tuple(
+            size_bin(config.nodes().size()),
+            bucket_by_num_inputs_ ? static_cast<unsigned>(config.num_in()) : 0U,
+            minimal_nodes_bin(config.nodes()));
+    }
+
     void maybe_emit(const intset &nodes)
     {
         if (samples_emitted_ >= max_samples_)
@@ -758,7 +795,7 @@ private:
 
         output_cb_(config);
         samples_emitted_++;
-        sample_count_by_bin_[size_bin(config.nodes().size())]++;
+        sample_count_by_bucket_[bucket_key(config)]++;
     }
 
     void enqueue_if_new(SearchState state)
@@ -817,8 +854,8 @@ private:
             candidates.emplace_back(
                 SearchState(intset(closed), std::move(frontier_next), std::move(blocked_next)),
                 added.size(),
-                size_bin(config.nodes().size()),
-                sample_count_by_bin_[size_bin(config.nodes().size())],
+                bucket_key(config),
+                sample_count_by_bucket_[bucket_key(config)],
                 first_added);
         }
 
@@ -827,23 +864,27 @@ private:
 
     std::vector<Candidate> select_candidates(std::vector<Candidate> candidates) const
     {
-        std::unordered_map<unsigned, std::size_t> best_by_bin;
+        std::unordered_map<
+            std::tuple<unsigned, unsigned, unsigned>,
+            std::size_t,
+            BucketKeyHash>
+            best_by_bin;
         std::vector<Candidate> clustered;
         clustered.reserve(candidates.size());
 
         for (auto &candidate : candidates) {
-            auto it = best_by_bin.find(candidate.size_bin);
+            auto it = best_by_bin.find(candidate.bucket_key);
             if (it == best_by_bin.end()) {
-                best_by_bin.emplace(candidate.size_bin, clustered.size());
+                best_by_bin.emplace(candidate.bucket_key, clustered.size());
                 clustered.push_back(std::move(candidate));
                 continue;
             }
 
             Candidate &current = clustered[it->second];
-            if (candidate.current_sample_count < current.current_sample_count ||
-                (candidate.current_sample_count == current.current_sample_count &&
+            if (candidate.current_bucket_count < current.current_bucket_count ||
+                (candidate.current_bucket_count == current.current_bucket_count &&
                  candidate.delta_size > current.delta_size) ||
-                (candidate.current_sample_count == current.current_sample_count &&
+                (candidate.current_bucket_count == current.current_bucket_count &&
                  candidate.delta_size == current.delta_size &&
                  candidate.first_added < current.first_added)) {
                 current = std::move(candidate);
@@ -854,8 +895,8 @@ private:
             clustered.begin(),
             clustered.end(),
             [](const Candidate &lhs, const Candidate &rhs) {
-                if (lhs.current_sample_count != rhs.current_sample_count)
-                    return lhs.current_sample_count < rhs.current_sample_count;
+                if (lhs.current_bucket_count != rhs.current_bucket_count)
+                    return lhs.current_bucket_count < rhs.current_bucket_count;
                 if (lhs.delta_size != rhs.delta_size)
                     return lhs.delta_size > rhs.delta_size;
                 if (lhs.state.nodes.size() != rhs.state.nodes.size())
@@ -871,6 +912,20 @@ private:
         return clustered;
     }
 
+    void emit_thickened(const SearchState &state, int radius)
+    {
+        maybe_emit(state.nodes);
+        if (radius <= 0 || samples_emitted_ >= max_samples_)
+            return;
+
+        auto candidates = select_candidates(build_candidates(state));
+        for (const auto &candidate : candidates) {
+            if (samples_emitted_ >= max_samples_)
+                return;
+            emit_thickened(candidate.state, radius - 1);
+        }
+    }
+
     void expand_with_contraction(SearchState state)
     {
         while (states_expanded_ < max_states_expanded_ &&
@@ -881,8 +936,11 @@ private:
             if (candidates.empty())
                 return;
 
-            for (auto &candidate : candidates)
-                maybe_emit(candidate.state.nodes);
+            for (const auto &candidate : candidates) {
+                if (samples_emitted_ >= max_samples_)
+                    return;
+                emit_thickened(candidate.state, thicken_radius_);
+            }
 
             if (samples_emitted_ >= max_samples_)
                 return;
@@ -907,6 +965,9 @@ private:
     int max_samples_;
     int max_children_per_state_;
     int size_bin_width_;
+    int thicken_radius_;
+    bool bucket_by_num_inputs_;
+    int minimal_node_bin_width_;
     intset forbidden_;
     std::vector<intset> closures_;
     std::vector<intset> augmented_closures_;
@@ -916,7 +977,8 @@ private:
     std::unordered_set<intset, IntsetHash> emitted_;
     std::unordered_set<SearchStateKey, SearchStateHash> visited_states_;
     std::deque<SearchState> agenda_;
-    std::vector<unsigned> sample_count_by_bin_;
+    std::unordered_map<std::tuple<unsigned, unsigned, unsigned>, unsigned, BucketKeyHash>
+        sample_count_by_bucket_;
     int states_expanded_ = 0;
     int samples_emitted_ = 0;
 };
@@ -930,7 +992,10 @@ void vs_sample_zero_output_connected_(
     int max_states_expanded,
     int max_samples,
     int max_children_per_state,
-    int size_bin_width)
+    int size_bin_width,
+    int thicken_radius,
+    bool bucket_by_num_inputs,
+    int minimal_node_bin_width)
 {
     SampledZeroOutputConnectedFinder(
         dfg,
@@ -941,7 +1006,10 @@ void vs_sample_zero_output_connected_(
         max_states_expanded,
         max_samples,
         max_children_per_state,
-        size_bin_width)
+        size_bin_width,
+        thicken_radius,
+        bucket_by_num_inputs,
+        minimal_node_bin_width)
         .enumerate();
 }
 
@@ -1187,7 +1255,10 @@ void vs_sample_zero_output_connected(
     int max_states_expanded,
     int max_samples,
     int max_children_per_state,
-    int size_bin_width)
+    int size_bin_width,
+    int thicken_radius,
+    bool bucket_by_num_inputs,
+    int minimal_node_bin_width)
 {
     vs_sample_zero_output_connected_(
         dfg,
@@ -1198,7 +1269,10 @@ void vs_sample_zero_output_connected(
         max_states_expanded,
         max_samples,
         max_children_per_state,
-        size_bin_width);
+        size_bin_width,
+        thicken_radius,
+        bucket_by_num_inputs,
+        minimal_node_bin_width);
 }
 
 void vs_grow_zero_output_connected(

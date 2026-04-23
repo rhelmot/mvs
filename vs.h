@@ -19,7 +19,10 @@ void vs_sample_zero_output_connected(
     int max_states_expanded,
     int max_samples,
     int max_children_per_state,
-    int size_bin_width);
+    int size_bin_width,
+    int thicken_radius,
+    bool bucket_by_num_inputs,
+    int minimal_node_bin_width);
 
 void vs_grow_zero_output_connected(
     const DFG &dfg,
