@@ -1019,11 +1019,14 @@ public:
                      int max_num_in,
                      int max_subgraph_size,
                      const DFG *alternate_graph,
-                     const std::function<bool(const IOSubgraph &)> &visit_cb)
+                     std::size_t initial_state_token,
+                     const std::function<std::optional<std::size_t>(
+                         const IOSubgraph &, std::size_t)> &visit_cb)
         : dfg_(dfg)
         , max_num_in_(max_num_in)
         , max_subgraph_size_(max_subgraph_size)
         , alternate_graph_(alternate_graph)
+        , initial_state_token_(initial_state_token)
         , visit_cb_(visit_cb)
         , forbidden_(dfg.forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
@@ -1054,20 +1057,21 @@ public:
             throw std::invalid_argument(
                 "seed does not satisfy the zero-output growth constraints");
 
-        std::vector<intset> stack;
-        stack.push_back(seed);
+        std::vector<std::pair<intset, std::size_t>> stack;
+        stack.emplace_back(seed, initial_state_token_);
         seen_.insert(intset(seed));
 
         while (!stack.empty()) {
-            intset current(std::move(stack.back()));
+            auto [current, state_token] = std::move(stack.back());
             stack.pop_back();
 
             IOSubgraph config(dfg_, intset(current));
-            if (!visit_cb_(config))
+            auto next_state_token = visit_cb_(config, state_token);
+            if (!next_state_token.has_value())
                 continue;
 
             intset current_augmented = augmented_nodes(dfg_, current);
-            std::vector<intset> next_states;
+            std::vector<std::pair<intset, std::size_t>> next_states;
             std::unordered_set<intset, IntsetHash> sibling_seen;
 
             for (int u = 0; u < dfg_.num_nodes(); u++) {
@@ -1088,16 +1092,16 @@ public:
                     continue;
                 if (!seen_.insert(intset(next_state)).second)
                     continue;
-                next_states.push_back(std::move(next_state));
+                next_states.emplace_back(std::move(next_state), *next_state_token);
             }
 
             std::sort(
                 next_states.begin(),
                 next_states.end(),
-                [](const intset &lhs, const intset &rhs) {
-                    if (lhs.size() != rhs.size())
-                        return lhs.size() > rhs.size();
-                    return lhs.minimum() > rhs.minimum();
+                [](const auto &lhs, const auto &rhs) {
+                    if (lhs.first.size() != rhs.first.size())
+                        return lhs.first.size() > rhs.first.size();
+                    return lhs.first.minimum() > rhs.first.minimum();
                 });
 
             for (auto &next_state : next_states)
@@ -1133,7 +1137,9 @@ private:
     int max_num_in_;
     int max_subgraph_size_;
     const DFG *alternate_graph_;
-    const std::function<bool(const IOSubgraph &)> &visit_cb_;
+    std::size_t initial_state_token_;
+    const std::function<std::optional<std::size_t>(const IOSubgraph &,
+                                                   std::size_t)> &visit_cb_;
     intset forbidden_;
     std::vector<intset> closures_;
     std::vector<intset> neighborhoods_;
@@ -1281,13 +1287,16 @@ void vs_grow_zero_output_connected(
     int max_num_in,
     int max_subgraph_size,
     const DFG *alternate_graph,
-    const std::function<bool(const IOSubgraph &)> &visit_cb)
+    std::size_t initial_state_token,
+    const std::function<std::optional<std::size_t>(const IOSubgraph &,
+                                                   std::size_t)> &visit_cb)
 {
     ZeroOutputGrower(
         dfg,
         max_num_in,
         max_subgraph_size,
         alternate_graph,
+        initial_state_token,
         visit_cb)
         .enumerate(seed);
 }

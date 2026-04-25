@@ -1,6 +1,8 @@
 #pragma once
 
 #include "dfg.h"
+#include <cstddef>
+#include <optional>
 
 void vs_enumerate(const DFG &dfg,
                   int max_num_in,
@@ -30,4 +32,6 @@ void vs_grow_zero_output_connected(
     int max_num_in,
     int max_subgraph_size,
     const DFG *alternate_graph,
-    const std::function<bool(const IOSubgraph &)> &visit_cb);
+    std::size_t initial_state_token,
+    const std::function<std::optional<std::size_t>(const IOSubgraph &,
+                                                   std::size_t)> &visit_cb);
