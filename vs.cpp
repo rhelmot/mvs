@@ -168,11 +168,44 @@ static intset zero_output_closure(const DFG &dfg,
 static bool is_weakly_connected_with_inputs(const DFG &dfg,
                                             const IOSubgraph &config)
 {
-    intset nodes(config.nodes());
-    for (const auto &u : config.inputs())
-        if (u < dfg.num_nodes())
-            nodes.add(u);
-    return is_weakly_connected_subgraph(dfg, nodes);
+    intset body(config.nodes());
+    intset inputs(dfg.num_nodes());
+    intset augmented(body);
+    for (const auto &u : config.inputs()) {
+        if (u < dfg.num_nodes()) {
+            inputs.add(u);
+            augmented.add(u);
+        }
+    }
+
+    int start = augmented.minimum();
+    if (start == -1)
+        return true;
+
+    intset visited(dfg.num_nodes());
+    std::vector<int> stack;
+    stack.push_back(start);
+    visited.add(start);
+
+    auto expand = [&](int u, const auto &neighbors) {
+        for (const auto &v : neighbors) {
+            if (!augmented.contains(v) || visited.contains(v))
+                continue;
+            if (inputs.contains(u) && inputs.contains(v))
+                continue;
+            visited.add(v);
+            stack.push_back(v);
+        }
+    };
+
+    while (!stack.empty()) {
+        int u = stack.back();
+        stack.pop_back();
+        expand(u, dfg.out_edges(u));
+        expand(u, dfg.in_edges(u));
+    }
+
+    return visited.size() == augmented.size();
 }
 
 namespace {
@@ -460,18 +493,26 @@ public:
         , forbidden_(dfg.forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , augmented_closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
-        , neighborhoods_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , body_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , input_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , valid_(dfg.num_nodes(), false)
     {
         for (int u = 0; u < dfg_.num_nodes(); u++) {
             closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
             augmented_closures_[u] = augmented_nodes(dfg_, closures_[u]);
-            neighborhoods_[u] = augmented_closures_[u];
-            for (const auto &v : augmented_closures_[u]) {
+            intset inputs(augmented_closures_[u]);
+            inputs.remove(closures_[u]);
+            for (const auto &v : closures_[u]) {
                 for (const auto &w : dfg_.in_edges(v))
-                    neighborhoods_[u].add(w);
+                    body_neighbors_[u].add(w);
                 for (const auto &w : dfg_.out_edges(v))
-                    neighborhoods_[u].add(w);
+                    body_neighbors_[u].add(w);
+            }
+            for (const auto &v : inputs) {
+                for (const auto &w : dfg_.in_edges(v))
+                    input_neighbors_[u].add(w);
+                for (const auto &w : dfg_.out_edges(v))
+                    input_neighbors_[u].add(w);
             }
             valid_[u] = !closures_[u].intersects(forbidden_);
         }
@@ -503,7 +544,7 @@ public:
                     continue;
                 if (closures_[u].is_subset_of(config_.nodes()))
                     continue;
-                if (neighborhoods_[u].intersects(current_augmented))
+                if (can_connect(u, config_.nodes(), current_augmented))
                     frontier.add(u);
             }
 
@@ -523,6 +564,15 @@ private:
         return closure_cache_
             .emplace(intset(nodes), zero_output_closure(dfg_, alternate_graph_, nodes))
             .first->second;
+    }
+
+    bool can_connect(int u,
+                     const intset &current_nodes,
+                     const intset &current_augmented) const
+    {
+        return augmented_closures_[u].intersects(current_augmented) ||
+               body_neighbors_[u].intersects(current_augmented) ||
+               input_neighbors_[u].intersects(current_nodes);
     }
 
     void emit(const IOSubgraph &config)
@@ -575,7 +625,7 @@ private:
                         continue;
                     if (closures_[u].is_subset_of(config_.nodes()))
                         continue;
-                    if (neighborhoods_[u].intersects(current_augmented))
+                    if (can_connect(u, config_.nodes(), current_augmented))
                         frontier_next.add(u);
                 }
 
@@ -595,7 +645,8 @@ private:
     intset forbidden_;
     std::vector<intset> closures_;
     std::vector<intset> augmented_closures_;
-    std::vector<intset> neighborhoods_;
+    std::vector<intset> body_neighbors_;
+    std::vector<intset> input_neighbors_;
     std::vector<bool> valid_;
     std::unordered_map<intset, intset, IntsetHash> closure_cache_;
     std::unordered_set<intset, IntsetHash> emitted_;
@@ -631,18 +682,26 @@ public:
         , forbidden_(dfg.forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , augmented_closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
-        , neighborhoods_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , body_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , input_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , valid_(dfg.num_nodes(), false)
     {
         for (int u = 0; u < dfg_.num_nodes(); u++) {
             closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
             augmented_closures_[u] = augmented_nodes(dfg_, closures_[u]);
-            neighborhoods_[u] = augmented_closures_[u];
-            for (const auto &v : augmented_closures_[u]) {
+            intset inputs(augmented_closures_[u]);
+            inputs.remove(closures_[u]);
+            for (const auto &v : closures_[u]) {
                 for (const auto &w : dfg_.in_edges(v))
-                    neighborhoods_[u].add(w);
+                    body_neighbors_[u].add(w);
                 for (const auto &w : dfg_.out_edges(v))
-                    neighborhoods_[u].add(w);
+                    body_neighbors_[u].add(w);
+            }
+            for (const auto &v : inputs) {
+                for (const auto &w : dfg_.in_edges(v))
+                    input_neighbors_[u].add(w);
+                for (const auto &w : dfg_.out_edges(v))
+                    input_neighbors_[u].add(w);
             }
             valid_[u] = !closures_[u].intersects(forbidden_);
         }
@@ -671,7 +730,7 @@ public:
                     continue;
                 if (closures_[u].is_subset_of(root_state.nodes))
                     continue;
-                if (neighborhoods_[u].intersects(current_augmented))
+                if (can_connect(u, root_state.nodes, current_augmented))
                     root_state.frontier.add(u);
             }
 
@@ -742,6 +801,15 @@ private:
         return closure_cache_
             .emplace(intset(nodes), zero_output_closure(dfg_, alternate_graph_, nodes))
             .first->second;
+    }
+
+    bool can_connect(int u,
+                     const intset &current_nodes,
+                     const intset &current_augmented) const
+    {
+        return augmented_closures_[u].intersects(current_augmented) ||
+               body_neighbors_[u].intersects(current_augmented) ||
+               input_neighbors_[u].intersects(current_nodes);
     }
 
     unsigned num_bins() const
@@ -847,7 +915,7 @@ private:
                     continue;
                 if (closures_[u].is_subset_of(config.nodes()))
                     continue;
-                if (neighborhoods_[u].intersects(current_augmented))
+                if (can_connect(u, config.nodes(), current_augmented))
                     frontier_next.add(u);
             }
 
@@ -971,7 +1039,8 @@ private:
     intset forbidden_;
     std::vector<intset> closures_;
     std::vector<intset> augmented_closures_;
-    std::vector<intset> neighborhoods_;
+    std::vector<intset> body_neighbors_;
+    std::vector<intset> input_neighbors_;
     std::vector<bool> valid_;
     std::unordered_map<intset, intset, IntsetHash> closure_cache_;
     std::unordered_set<intset, IntsetHash> emitted_;
@@ -1030,18 +1099,27 @@ public:
         , visit_cb_(visit_cb)
         , forbidden_(dfg.forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
-        , neighborhoods_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , augmented_closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , body_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , input_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , valid_(dfg.num_nodes(), false)
     {
         for (int u = 0; u < dfg_.num_nodes(); u++) {
             closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
-            intset augmented = augmented_nodes(dfg_, closures_[u]);
-            neighborhoods_[u] = augmented;
-            for (const auto &v : augmented) {
+            augmented_closures_[u] = augmented_nodes(dfg_, closures_[u]);
+            intset inputs(augmented_closures_[u]);
+            inputs.remove(closures_[u]);
+            for (const auto &v : closures_[u]) {
                 for (const auto &w : dfg_.in_edges(v))
-                    neighborhoods_[u].add(w);
+                    body_neighbors_[u].add(w);
                 for (const auto &w : dfg_.out_edges(v))
-                    neighborhoods_[u].add(w);
+                    body_neighbors_[u].add(w);
+            }
+            for (const auto &v : inputs) {
+                for (const auto &w : dfg_.in_edges(v))
+                    input_neighbors_[u].add(w);
+                for (const auto &w : dfg_.out_edges(v))
+                    input_neighbors_[u].add(w);
             }
             valid_[u] = !closures_[u].intersects(forbidden_);
         }
@@ -1079,7 +1157,7 @@ public:
                     continue;
                 if (closures_[u].is_subset_of(current))
                     continue;
-                if (!neighborhoods_[u].intersects(current_augmented))
+                if (!can_connect(u, current, current_augmented))
                     continue;
 
                 intset next_state = closure_for(
@@ -1120,6 +1198,15 @@ private:
             .first->second;
     }
 
+    bool can_connect(int u,
+                     const intset &current_nodes,
+                     const intset &current_augmented) const
+    {
+        return augmented_closures_[u].intersects(current_augmented) ||
+               body_neighbors_[u].intersects(current_augmented) ||
+               input_neighbors_[u].intersects(current_nodes);
+    }
+
     bool is_valid_state(const intset &nodes) const
     {
         if (nodes.intersects(forbidden_))
@@ -1142,7 +1229,9 @@ private:
                                                    std::size_t)> &visit_cb_;
     intset forbidden_;
     std::vector<intset> closures_;
-    std::vector<intset> neighborhoods_;
+    std::vector<intset> augmented_closures_;
+    std::vector<intset> body_neighbors_;
+    std::vector<intset> input_neighbors_;
     std::vector<bool> valid_;
     std::unordered_map<intset, intset, IntsetHash> closure_cache_;
     std::unordered_set<intset, IntsetHash> seen_;
