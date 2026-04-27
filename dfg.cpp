@@ -131,13 +131,23 @@ void DFG::index()
     }
 }
 
-intset DFG::forbidden() const
+intset DFG::body_forbidden() const
 {
     intset s(num_nodes());
     for (int i = 0; i < num_nodes(); i++) {
-        if (is_forbidden(i) ||
+        if (is_body_forbidden(i) ||
             (forbid_sources_and_sinks_ &&
              (in_edges(i).empty() || out_edges(i).empty())))
+            s.add(i);
+    }
+    return s;
+}
+
+intset DFG::input_forbidden() const
+{
+    intset s(num_nodes());
+    for (int i = 0; i < num_nodes(); i++) {
+        if (is_input_forbidden(i))
             s.add(i);
     }
     return s;

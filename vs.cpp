@@ -31,15 +31,18 @@ static const bool VERIFY = false;
 
 static bool verify_config(const DFG &dfg, const IOSubgraph &config)
 {
-    if (config.nodes().intersects(dfg.forbidden()))
+    if (config.nodes().intersects(dfg.body_forbidden()))
         return false;
+    for (const auto &u : config.inputs())
+        if (u < dfg.num_nodes() && dfg.is_input_forbidden(u))
+            return false;
 
     return config.nodes() == config.closure();
 }
 
 static intset config_exclusion(const DFG &dfg, const intset &config)
 {
-    intset out(dfg.forbidden());
+    intset out(dfg.body_forbidden());
 
     // The exhaustive enumerator grows subgraphs from candidate outputs.
     // Upstream assumed graph sinks were already forbidden, which seeded this
@@ -68,8 +71,10 @@ static std::unique_ptr<DFG> reverse_dfg(const DFG &dfg)
 
     for (int u = 0; u < dfg.num_nodes(); u++) {
         reversed->weight(u) = dfg.weight(u);
-        if (dfg.is_forbidden(u))
-            reversed->set_forbidden(u);
+        if (dfg.is_body_forbidden(u))
+            reversed->set_body_forbidden(u);
+        if (dfg.is_input_forbidden(u))
+            reversed->set_input_forbidden(u);
         for (const auto &v : dfg.out_edges(u))
             reversed->add_edge(v, u);
     }
@@ -206,6 +211,14 @@ static bool is_weakly_connected_with_inputs(const DFG &dfg,
     }
 
     return visited.size() == augmented.size();
+}
+
+static bool has_forbidden_inputs(const DFG &dfg, const IOSubgraph &config)
+{
+    for (const auto &u : config.inputs())
+        if (u < dfg.num_nodes() && dfg.is_input_forbidden(u))
+            return true;
+    return false;
 }
 
 namespace {
@@ -370,7 +383,7 @@ void VSFinder::visit(int max_num_in,
                 break;
             intset closed = dual_closure(
                 dfg, alternate_graph_, config_.nodes() | singleton_set(config_.nodes().max_size(), id));
-            if (closed.intersects(F_) || closed.intersects(dfg.forbidden()))
+            if (closed.intersects(F_) || closed.intersects(dfg.body_forbidden()))
                 return;
             intset added(closed);
             added.remove(config_.nodes());
@@ -381,7 +394,8 @@ void VSFinder::visit(int max_num_in,
         }
 
         for (auto &u : config_.inputs()) {
-            if (u >= dfg.num_nodes() || F_.contains(u))
+            if (u >= dfg.num_nodes() || F_.contains(u) ||
+                dfg.is_input_forbidden(u))
                 return;
         }
 
@@ -404,8 +418,9 @@ void VSFinder::visit(int max_num_in,
     }
 
     if (id == -1) {
-        if (!connected_only_ ||
-            is_weakly_connected_subgraph(dfg, config_.nodes())) {
+        if (!has_forbidden_inputs(dfg, config_) &&
+            (!connected_only_ ||
+             is_weakly_connected_subgraph(dfg, config_.nodes()))) {
             output_cb(config_);
         }
 
@@ -417,7 +432,7 @@ void VSFinder::visit(int max_num_in,
 
     intset closed = dual_closure(
         dfg, alternate_graph_, config_.nodes() | singleton_set(config_.nodes().max_size(), id));
-    if (!closed.intersects(F_) && !closed.intersects(dfg.forbidden())) {
+    if (!closed.intersects(F_) && !closed.intersects(dfg.body_forbidden())) {
         intset added(closed);
         added.remove(config_.nodes());
         add_nodes(config_, added);
@@ -457,7 +472,7 @@ void vs_enumerate_zero_inputs_(const DFG &dfg,
             break;
         }
         nodes = dual_closure(dfg, alternate_graph, nodes | addable);
-        if (nodes.intersects(F) || nodes.intersects(dfg.forbidden()))
+        if (nodes.intersects(F) || nodes.intersects(dfg.body_forbidden()))
             return;
         if (max_subgraph_size >= 0 &&
             nodes.size() > static_cast<unsigned>(max_subgraph_size))
@@ -490,7 +505,7 @@ public:
         , output_cb_(output_cb)
         , alternate_graph_(alternate_graph)
         , config_(dfg)
-        , forbidden_(dfg.forbidden())
+        , forbidden_(dfg.body_forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , augmented_closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , body_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
@@ -526,8 +541,9 @@ public:
 
             add_nodes(config_, closures_[root]);
             if ((max_subgraph_size_ < 0 ||
-                 config_.nodes().size() <= static_cast<unsigned>(max_subgraph_size_)) &&
+                config_.nodes().size() <= static_cast<unsigned>(max_subgraph_size_)) &&
                 config_.num_in() <= max_num_in_ &&
+                !has_forbidden_inputs(dfg_, config_) &&
                 config_.num_out() == 0 &&
                 is_weakly_connected_with_inputs(dfg_, config_))
                 emit(config_);
@@ -613,6 +629,7 @@ private:
             if ((max_subgraph_size_ < 0 ||
                  config_.nodes().size() <= static_cast<unsigned>(max_subgraph_size_)) &&
                 config_.num_in() <= max_num_in_ &&
+                !has_forbidden_inputs(dfg_, config_) &&
                 config_.num_out() == 0) {
                 if (is_weakly_connected_with_inputs(dfg_, config_))
                     emit(config_);
@@ -679,7 +696,7 @@ public:
         , thicken_radius_(thicken_radius)
         , bucket_by_num_inputs_(bucket_by_num_inputs)
         , minimal_node_bin_width_(minimal_node_bin_width)
-        , forbidden_(dfg.forbidden())
+        , forbidden_(dfg.body_forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , augmented_closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , body_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
@@ -854,7 +871,8 @@ private:
         if (max_subgraph_size_ >= 0 &&
             config.nodes().size() > static_cast<unsigned>(max_subgraph_size_))
             return;
-        if (config.num_in() > max_num_in_ || config.num_out() != 0)
+        if (config.num_in() > max_num_in_ || config.num_out() != 0 ||
+            has_forbidden_inputs(dfg_, config))
             return;
         if (!is_weakly_connected_with_inputs(dfg_, config))
             return;
@@ -905,7 +923,8 @@ private:
             if (max_subgraph_size_ >= 0 &&
                 config.nodes().size() > static_cast<unsigned>(max_subgraph_size_))
                 continue;
-            if (config.num_in() > max_num_in_ || config.num_out() != 0)
+            if (config.num_in() > max_num_in_ || config.num_out() != 0 ||
+                has_forbidden_inputs(dfg_, config))
                 continue;
 
             intset frontier_next(frontier_remaining);
@@ -1097,7 +1116,7 @@ public:
         , alternate_graph_(alternate_graph)
         , initial_state_token_(initial_state_token)
         , visit_cb_(visit_cb)
-        , forbidden_(dfg.forbidden())
+        , forbidden_(dfg.body_forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , augmented_closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , body_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
@@ -1215,7 +1234,8 @@ private:
         if (max_subgraph_size_ >= 0 &&
             config.nodes().size() > static_cast<unsigned>(max_subgraph_size_))
             return false;
-        if (config.num_in() > max_num_in_ || config.num_out() != 0)
+        if (config.num_in() > max_num_in_ || config.num_out() != 0 ||
+            has_forbidden_inputs(dfg_, config))
             return false;
         return is_weakly_connected_with_inputs(dfg_, config);
     }
@@ -1275,6 +1295,7 @@ void vs_enumerate_zero_outputs_(const DFG &dfg,
                  original_subgraph.nodes().size() <= static_cast<unsigned>(max_subgraph_size)) &&
                 original_subgraph.num_out() == 0 &&
                 original_subgraph.num_in() <= max_num_in &&
+                !has_forbidden_inputs(dfg, original_subgraph) &&
                 (!connected_only ||
                  is_weakly_connected_with_inputs(dfg, original_subgraph))) {
                 output_cb(original_subgraph);
@@ -1313,7 +1334,7 @@ void vs_enumerate_(const DFG &dfg,
         auto pred = outputs.pred();
         intset valid(dfg.num_nodes());
         for (const auto &u : exclusion) {
-            if (!dfg.is_forbidden(u) &&
+            if (!dfg.is_body_forbidden(u) &&
                 !(pred.contains(u) && dfg.succ(u).intersects(pred, exclusion)))
                 valid.add(u);
         }

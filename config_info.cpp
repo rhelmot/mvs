@@ -44,7 +44,12 @@ int main(int argc, char *argv[])
     intset closure = config.closure();
     nlohmann::json json = config;
     json["convex"] = config.nodes() == closure;
-    json["valid"] = !config.nodes().intersects(dfg->forbidden());
+    bool has_forbidden_inputs = false;
+    for (const auto &u : config.inputs())
+        if (u < dfg->num_nodes() && dfg->is_input_forbidden(u))
+            has_forbidden_inputs = true;
+    json["valid"] =
+        !config.nodes().intersects(dfg->body_forbidden()) && !has_forbidden_inputs;
     std::cout << json.dump(4) << std::endl;
 
     return 0;

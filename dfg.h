@@ -18,7 +18,8 @@ class DFG {
         vset<int> in_list;
         vset<int> out_list;
         double weight = 1;
-        bool forbidden = false;
+        bool body_forbidden = false;
+        bool input_forbidden = false;
         intset pred;
         intset succ;
     };
@@ -50,7 +51,13 @@ public:
         nodes_[u].out_list.remove(v);
         nodes_[v].in_list.remove(u);
     }
-    void set_forbidden(int u) { nodes_[u].forbidden = true; }
+    void set_forbidden(int u)
+    {
+        set_body_forbidden(u);
+        set_input_forbidden(u);
+    }
+    void set_body_forbidden(int u) { nodes_[u].body_forbidden = true; }
+    void set_input_forbidden(int u) { nodes_[u].input_forbidden = true; }
     void index();
 
     const std::string &name() const { return name_; }
@@ -62,8 +69,12 @@ public:
     const vset<int> &out_edges(int u) const { return nodes_[u].out_list; }
     const intset &pred(int u) const { return nodes_[u].pred; }
     const intset &succ(int u) const { return nodes_[u].succ; }
-    bool is_forbidden(int u) const { return nodes_[u].forbidden; }
-    intset forbidden() const;
+    bool is_forbidden(int u) const { return is_body_forbidden(u); }
+    bool is_body_forbidden(int u) const { return nodes_[u].body_forbidden; }
+    bool is_input_forbidden(int u) const { return nodes_[u].input_forbidden; }
+    intset forbidden() const { return body_forbidden(); }
+    intset body_forbidden() const;
+    intset input_forbidden() const;
 
 private:
     std::string name_;

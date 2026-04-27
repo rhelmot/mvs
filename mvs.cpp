@@ -50,6 +50,14 @@ static bool is_sink(const DFG &dfg, const intset &config, int u)
     return true;
 }
 
+static bool has_forbidden_inputs(const DFG &dfg, const IOSubgraph &config)
+{
+    for (const auto &u : config.inputs())
+        if (u < dfg.num_nodes() && dfg.is_input_forbidden(u))
+            return true;
+    return false;
+}
+
 int MVSFinder::find_best_recursion_node(int max_num_in,
                                         int max_num_out,
                                         int num_perm_in,
@@ -107,7 +115,8 @@ void MVSFinder::visit(double dels,
         return;
 
     if ((max_subgraph_size_ < 0 || config_.nodes().size() <= static_cast<unsigned>(max_subgraph_size_)) &&
-        config_.num_in() <= max_num_in && config_.num_out() <= max_num_out) {
+        config_.num_in() <= max_num_in && config_.num_out() <= max_num_out &&
+        !has_forbidden_inputs(*dfg_, config_)) {
         double weight = config_.weight();
         int iweight = weight;
         for (auto &cluster : s_clusters_)
@@ -379,7 +388,8 @@ std::vector<IOSubgraph> MVSFinder::enumerate(int max_num_in,
         if (mvsc.weight() >= m) {
             if ((max_subgraph_size_ >= 0 &&
                  mvsc.nodes().size() > static_cast<unsigned>(max_subgraph_size_)) ||
-                mvsc.num_in() > max_num_in || mvsc.num_out() > max_num_out)
+                mvsc.num_in() > max_num_in || mvsc.num_out() > max_num_out ||
+                has_forbidden_inputs(*dfg_, mvsc))
                 find_mvsio(mvsc, true, m, max_num_in, max_num_out);
             else
                 mvsc.io_weight = mvsc.weight();
@@ -401,7 +411,8 @@ std::vector<IOSubgraph> MVSFinder::enumerate(int max_num_in,
             std::cerr << json.dump() << std::endl;
             if ((max_subgraph_size_ >= 0 &&
                  mvsc.nodes().size() > static_cast<unsigned>(max_subgraph_size_)) ||
-                mvsc.io_weight < mvsc.weight())
+                mvsc.io_weight < mvsc.weight() ||
+                has_forbidden_inputs(*dfg_, mvsc))
                 find_mvsio(mvsc, false, max_io_weight, max_num_in, max_num_out);
             else
                 io_output_->emplace_back(mvsc);
@@ -475,7 +486,7 @@ MVSFinder::MVSFinder(DFG *dfg)
     // compute P sets and equivalence classes
     auto class_of = std::make_unique<int[]>(dfg->num_nodes());
     intset P(dfg->num_nodes());
-    intset F = dfg->forbidden();
+    intset F = dfg->body_forbidden();
     for (int u = 0; u < dfg->num_nodes(); u++) {
         if (F.contains(u))
             continue;
