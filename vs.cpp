@@ -548,6 +548,12 @@ public:
                 is_weakly_connected_with_inputs(dfg_, config_))
                 emit(config_);
 
+            if (max_subgraph_size_ >= 0 &&
+                config_.nodes().size() >= static_cast<unsigned>(max_subgraph_size_)) {
+                remove_nodes(config_, closures_[root]);
+                continue;
+            }
+
             intset blocked(dfg_.num_nodes());
             blocked.add(root);
             blocked.add(dfg_.pred(root));
@@ -599,6 +605,10 @@ private:
 
     void visit(intset &frontier, const intset &blocked)
     {
+        if (max_subgraph_size_ >= 0 &&
+            config_.nodes().size() >= static_cast<unsigned>(max_subgraph_size_))
+            return;
+
         SearchState state(config_.nodes(), frontier, blocked);
         if (!visited_states_.insert(std::move(state)).second)
             return;
@@ -634,19 +644,22 @@ private:
                 if (is_weakly_connected_with_inputs(dfg_, config_))
                     emit(config_);
 
-                intset frontier_next(frontier);
-                intset current_augmented = augmented_nodes(dfg_, config_.nodes());
-                for (int u = next + 1; u < dfg_.num_nodes(); u++) {
-                    if (!valid_[u] || blocked_next.contains(u) ||
-                        frontier_next.contains(u))
-                        continue;
-                    if (closures_[u].is_subset_of(config_.nodes()))
-                        continue;
-                    if (can_connect(u, config_.nodes(), current_augmented))
-                        frontier_next.add(u);
-                }
+                if (max_subgraph_size_ < 0 ||
+                    config_.nodes().size() < static_cast<unsigned>(max_subgraph_size_)) {
+                    intset frontier_next(frontier);
+                    intset current_augmented = augmented_nodes(dfg_, config_.nodes());
+                    for (int u = next + 1; u < dfg_.num_nodes(); u++) {
+                        if (!valid_[u] || blocked_next.contains(u) ||
+                            frontier_next.contains(u))
+                            continue;
+                        if (closures_[u].is_subset_of(config_.nodes()))
+                            continue;
+                        if (can_connect(u, config_.nodes(), current_augmented))
+                            frontier_next.add(u);
+                    }
 
-                visit(frontier_next, blocked_next);
+                    visit(frontier_next, blocked_next);
+                }
             }
 
             remove_nodes(config_, added);
@@ -737,6 +750,10 @@ public:
                 intset(closures_[root]),
                 intset(dfg_.num_nodes()),
                 intset(dfg_.num_nodes()));
+            if (max_subgraph_size_ >= 0 &&
+                root_state.nodes.size() > static_cast<unsigned>(max_subgraph_size_))
+                continue;
+
             root_state.blocked.add(root);
             root_state.blocked.add(dfg_.pred(root));
             root_state.blocked.add(dfg_.succ(root));
@@ -1002,7 +1019,9 @@ private:
     void emit_thickened(const SearchState &state, int radius)
     {
         maybe_emit(state.nodes);
-        if (radius <= 0 || samples_emitted_ >= max_samples_)
+        if (radius <= 0 || samples_emitted_ >= max_samples_ ||
+            (max_subgraph_size_ >= 0 &&
+             state.nodes.size() >= static_cast<unsigned>(max_subgraph_size_)))
             return;
 
         auto candidates = select_candidates(build_candidates(state));
@@ -1015,6 +1034,10 @@ private:
 
     void expand_with_contraction(SearchState state)
     {
+        if (max_subgraph_size_ >= 0 &&
+            state.nodes.size() >= static_cast<unsigned>(max_subgraph_size_))
+            return;
+
         while (states_expanded_ < max_states_expanded_ &&
                samples_emitted_ < max_samples_) {
             states_expanded_++;
