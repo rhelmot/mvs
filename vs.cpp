@@ -298,6 +298,7 @@ public:
         , alternate_graph_(alternate_graph)
         , max_subgraph_size_(max_subgraph_size)
         , connected_only_(connected_only)
+        , forbidden_(dfg.body_forbidden())
     {
     }
 
@@ -310,6 +311,7 @@ private:
     const DFG *alternate_graph_;
     int max_subgraph_size_;
     bool connected_only_;
+    intset forbidden_;
 };
 
 static bool can_still_be_connected(const IOSubgraph &config)
@@ -356,6 +358,9 @@ void VSFinder::visit(int max_num_in,
 {
     const DFG &dfg = config_.dfg();
     int num_perm_in = 0;
+    if (config_.nodes().intersects(forbidden_))
+        return;
+
     for (auto &u : config_.inputs()) {
         if (u >= dfg.num_nodes() || F_.contains(u))
             num_perm_in++;
@@ -459,6 +464,9 @@ void vs_enumerate_zero_inputs_(const DFG &dfg,
     if (max_subgraph_size >= 0 &&
         nodes.size() > static_cast<unsigned>(max_subgraph_size))
         return;
+    if (nodes.intersects(dfg.body_forbidden()))
+        return;
+
     intset F(config_exclusion(dfg, outputs.nodes()));
 
     while (true) {
