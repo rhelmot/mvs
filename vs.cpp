@@ -1353,11 +1353,13 @@ public:
 
     void enumerate()
     {
-        if (max_states_expanded_ <= 0 || max_samples_ <= 0)
+        if (max_samples_ <= 0)
             return;
 
         emit_boundary_pair_samples();
         if (samples_emitted_ >= max_samples_)
+            return;
+        if (max_states_expanded_ <= 0)
             return;
 
         for (int root = 0; root < dfg_.num_nodes(); root++) {
@@ -1576,17 +1578,32 @@ private:
         if (boundary_pair_samples_ <= 0)
             return;
 
+        static constexpr std::size_t max_transitive_inputs_per_output = 32;
         std::vector<BoundaryCandidate> candidates;
         for (int output = 0; output < dfg_.num_nodes(); output++) {
             if (dfg_.is_body_forbidden(output))
                 continue;
 
             std::vector<int> inputs;
-            for (const auto &input : dfg_.pred(output))
+            for (const auto &input : dfg_.in_edges(output))
                 inputs.push_back(input);
             std::sort(inputs.begin(), inputs.end(), std::greater<int>());
-            if (inputs.size() > 128)
-                inputs.resize(128);
+
+            std::unordered_set<int> seen_inputs(inputs.begin(), inputs.end());
+            std::vector<int> transitive_inputs;
+            for (const auto &input : dfg_.pred(output)) {
+                if (seen_inputs.find(input) != seen_inputs.end())
+                    continue;
+                transitive_inputs.push_back(input);
+            }
+            std::sort(
+                transitive_inputs.begin(),
+                transitive_inputs.end(),
+                std::greater<int>());
+            if (transitive_inputs.size() > max_transitive_inputs_per_output)
+                transitive_inputs.resize(max_transitive_inputs_per_output);
+            inputs.insert(
+                inputs.end(), transitive_inputs.begin(), transitive_inputs.end());
 
             for (const auto &input : inputs) {
                 if (input < dfg_.num_nodes() && dfg_.is_input_forbidden(input))
