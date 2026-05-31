@@ -1288,6 +1288,642 @@ private:
     std::unordered_set<intset, IntsetHash> seen_;
 };
 
+struct NonzeroBucketKeyHash {
+    std::size_t operator()(
+        const std::tuple<unsigned, unsigned, unsigned, unsigned> &bucket) const
+    {
+        const auto &[size_bin, num_inputs, num_outputs, minimal_nodes_bin] = bucket;
+        std::size_t seed = std::hash<unsigned>{}(size_bin);
+        hash_combine(seed, num_inputs);
+        hash_combine(seed, num_outputs);
+        hash_combine(seed, minimal_nodes_bin);
+        return seed;
+    }
+};
+
+class SampledNonzeroOutputConnectedFinder {
+public:
+    SampledNonzeroOutputConnectedFinder(
+        const DFG &dfg,
+        int max_num_in,
+        int max_num_out,
+        int max_subgraph_size,
+        const std::function<void(const IOSubgraph &)> &output_cb,
+        const DFG *alternate_graph,
+        int max_states_expanded,
+        int max_samples,
+        int max_children_per_state,
+        int size_bin_width,
+        int thicken_radius,
+        bool bucket_by_num_inputs,
+        bool bucket_by_num_outputs,
+        int minimal_node_bin_width,
+        int boundary_pair_samples)
+        : dfg_(dfg)
+        , max_num_in_(max_num_in)
+        , max_num_out_(max_num_out)
+        , max_subgraph_size_(max_subgraph_size)
+        , output_cb_(output_cb)
+        , alternate_graph_(alternate_graph)
+        , max_states_expanded_(max_states_expanded)
+        , max_samples_(max_samples)
+        , max_children_per_state_(max_children_per_state)
+        , size_bin_width_(size_bin_width)
+        , thicken_radius_(thicken_radius)
+        , bucket_by_num_inputs_(bucket_by_num_inputs)
+        , bucket_by_num_outputs_(bucket_by_num_outputs)
+        , minimal_node_bin_width_(minimal_node_bin_width)
+        , boundary_pair_samples_(boundary_pair_samples)
+        , forbidden_(dfg.body_forbidden())
+        , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , body_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , valid_(dfg.num_nodes(), false)
+    {
+        for (int u = 0; u < dfg_.num_nodes(); u++) {
+            closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
+            for (const auto &v : closures_[u]) {
+                for (const auto &w : dfg_.in_edges(v))
+                    body_neighbors_[u].add(w);
+                for (const auto &w : dfg_.out_edges(v))
+                    body_neighbors_[u].add(w);
+            }
+            valid_[u] = !closures_[u].intersects(forbidden_);
+        }
+    }
+
+    void enumerate()
+    {
+        if (max_states_expanded_ <= 0 || max_samples_ <= 0)
+            return;
+
+        emit_boundary_pair_samples();
+        if (samples_emitted_ >= max_samples_)
+            return;
+
+        for (int root = 0; root < dfg_.num_nodes(); root++) {
+            if (!valid_[root])
+                continue;
+            if (max_subgraph_size_ >= 0 &&
+                closures_[root].size() >
+                    static_cast<unsigned>(max_subgraph_size_))
+                continue;
+            enqueue_if_new(SearchState(intset(closures_[root])));
+        }
+
+        while (!agenda_.empty() && states_expanded_ < max_states_expanded_ &&
+               samples_emitted_ < max_samples_) {
+            SearchState current(std::move(agenda_.front()));
+            agenda_.pop_front();
+            maybe_emit(current.nodes);
+            expand(std::move(current));
+        }
+    }
+
+private:
+    struct SearchState {
+        intset nodes;
+
+        explicit SearchState(intset nodes_)
+            : nodes(std::move(nodes_))
+        {
+        }
+
+        SearchState(const SearchState &) = default;
+        SearchState(SearchState &&) noexcept = default;
+        SearchState &operator=(const SearchState &) = default;
+        SearchState &operator=(SearchState &&) noexcept = default;
+    };
+
+    struct Candidate {
+        SearchState state;
+        unsigned delta_size;
+        std::tuple<unsigned, unsigned, unsigned, unsigned> bucket_key;
+        unsigned current_bucket_count;
+        int first_added;
+        bool emittable;
+
+        Candidate(SearchState state_,
+                  unsigned delta_size_,
+                  std::tuple<unsigned, unsigned, unsigned, unsigned> bucket_key_,
+                  unsigned current_bucket_count_,
+                  int first_added_,
+                  bool emittable_)
+            : state(std::move(state_))
+            , delta_size(delta_size_)
+            , bucket_key(std::move(bucket_key_))
+            , current_bucket_count(current_bucket_count_)
+            , first_added(first_added_)
+            , emittable(emittable_)
+        {
+        }
+
+        Candidate(const Candidate &) = default;
+        Candidate(Candidate &&) noexcept = default;
+        Candidate &operator=(const Candidate &) = default;
+        Candidate &operator=(Candidate &&) noexcept = default;
+    };
+
+    struct BoundaryCandidate {
+        intset nodes;
+        unsigned size;
+        int input;
+        int output;
+
+        BoundaryCandidate(intset nodes_, int input_, int output_)
+            : nodes(std::move(nodes_))
+            , size(nodes.size())
+            , input(input_)
+            , output(output_)
+        {
+        }
+
+        BoundaryCandidate(const BoundaryCandidate &) = default;
+        BoundaryCandidate(BoundaryCandidate &&) noexcept = default;
+        BoundaryCandidate &operator=(const BoundaryCandidate &) = default;
+        BoundaryCandidate &operator=(BoundaryCandidate &&) noexcept = default;
+    };
+
+    const intset &closure_for(const intset &nodes)
+    {
+        auto it = closure_cache_.find(nodes);
+        if (it != closure_cache_.end())
+            return it->second;
+        return closure_cache_
+            .emplace(intset(nodes), dual_closure(dfg_, alternate_graph_, nodes))
+            .first->second;
+    }
+
+    bool can_connect(int u, const intset &current_nodes) const
+    {
+        return closures_[u].intersects(current_nodes) ||
+               body_neighbors_[u].intersects(current_nodes);
+    }
+
+    intset boundary_pair_closure(int input, int output)
+    {
+        intset nodes(singleton_set(dfg_.num_nodes(), output));
+        while (true) {
+            intset next(nodes);
+            for (const auto &u : nodes) {
+                for (const auto &p : dfg_.in_edges(u))
+                    if (p != input)
+                        next.add(p);
+                if (u == output)
+                    continue;
+                for (const auto &s : dfg_.out_edges(u))
+                    next.add(s);
+            }
+            if (alternate_graph_ != nullptr)
+                next = dual_closure(dfg_, alternate_graph_, next);
+            if (next == nodes)
+                return next;
+            nodes = std::move(next);
+            if (max_subgraph_size_ >= 0 &&
+                nodes.size() > static_cast<unsigned>(max_subgraph_size_))
+                return nodes;
+            if (nodes.intersects(forbidden_))
+                return nodes;
+        }
+    }
+
+    unsigned size_bin(unsigned size) const
+    {
+        return size / static_cast<unsigned>(size_bin_width_);
+    }
+
+    unsigned minimal_nodes_bin(const intset &nodes) const
+    {
+        if (minimal_node_bin_width_ <= 0)
+            return 0;
+
+        unsigned minimal_nodes = 0;
+        for (const auto &u : nodes)
+            if (!dfg_.pred(u).intersects(nodes))
+                minimal_nodes++;
+        return minimal_nodes / static_cast<unsigned>(minimal_node_bin_width_);
+    }
+
+    std::tuple<unsigned, unsigned, unsigned, unsigned> bucket_key(
+        const IOSubgraph &config) const
+    {
+        return std::make_tuple(
+            size_bin(config.nodes().size()),
+            bucket_by_num_inputs_ ? static_cast<unsigned>(config.num_in()) : 0U,
+            bucket_by_num_outputs_ ? static_cast<unsigned>(config.num_out()) : 0U,
+            minimal_nodes_bin(config.nodes()));
+    }
+
+    bool is_valid_config(const IOSubgraph &config) const
+    {
+        if (max_subgraph_size_ >= 0 &&
+            config.nodes().size() > static_cast<unsigned>(max_subgraph_size_))
+            return false;
+        if (config.num_in() > max_num_in_ || config.num_out() == 0 ||
+            config.num_out() > max_num_out_ || has_forbidden_inputs(dfg_, config))
+            return false;
+        return is_weakly_connected_subgraph(dfg_, config.nodes());
+    }
+
+    void maybe_emit(const intset &nodes)
+    {
+        if (samples_emitted_ >= max_samples_)
+            return;
+        if (nodes.intersects(forbidden_))
+            return;
+
+        IOSubgraph config(dfg_, intset(nodes));
+        if (!is_valid_config(config))
+            return;
+        if (!emitted_.insert(intset(config.nodes())).second)
+            return;
+
+        output_cb_(config);
+        samples_emitted_++;
+        sample_count_by_bucket_[bucket_key(config)]++;
+    }
+
+    void keep_boundary_candidate(std::vector<BoundaryCandidate> &candidates,
+                                 BoundaryCandidate candidate) const
+    {
+        auto equivalent = std::find_if(
+            candidates.begin(),
+            candidates.end(),
+            [&candidate](const BoundaryCandidate &current) {
+                return current.nodes == candidate.nodes;
+            });
+        if (equivalent != candidates.end())
+            return;
+
+        candidates.push_back(std::move(candidate));
+        std::sort(
+            candidates.begin(),
+            candidates.end(),
+            [](const BoundaryCandidate &lhs, const BoundaryCandidate &rhs) {
+                if (lhs.size != rhs.size)
+                    return lhs.size > rhs.size;
+                if (lhs.output != rhs.output)
+                    return lhs.output < rhs.output;
+                return lhs.input > rhs.input;
+            });
+        if (candidates.size() >
+            static_cast<std::size_t>(boundary_pair_samples_)) {
+            candidates.pop_back();
+        }
+    }
+
+    void emit_boundary_pair_samples()
+    {
+        if (boundary_pair_samples_ <= 0)
+            return;
+
+        std::vector<BoundaryCandidate> candidates;
+        for (int output = 0; output < dfg_.num_nodes(); output++) {
+            if (dfg_.is_body_forbidden(output))
+                continue;
+
+            std::vector<int> inputs;
+            for (const auto &input : dfg_.pred(output))
+                inputs.push_back(input);
+            std::sort(inputs.begin(), inputs.end(), std::greater<int>());
+            if (inputs.size() > 128)
+                inputs.resize(128);
+
+            for (const auto &input : inputs) {
+                if (input < dfg_.num_nodes() && dfg_.is_input_forbidden(input))
+                    continue;
+                intset nodes = boundary_pair_closure(input, output);
+                if (nodes.contains(input) || nodes.intersects(forbidden_))
+                    continue;
+                IOSubgraph config(dfg_, intset(nodes));
+                if (!is_valid_config(config))
+                    continue;
+                keep_boundary_candidate(
+                    candidates,
+                    BoundaryCandidate(std::move(nodes), input, output));
+            }
+        }
+
+        for (const auto &candidate : candidates) {
+            if (samples_emitted_ >= max_samples_)
+                return;
+            maybe_emit(candidate.nodes);
+        }
+    }
+
+    void enqueue_if_new(SearchState state)
+    {
+        if (!visited_states_.insert(intset(state.nodes)).second)
+            return;
+        agenda_.push_back(std::move(state));
+    }
+
+    std::vector<Candidate> build_candidates(const SearchState &state)
+    {
+        std::vector<Candidate> candidates;
+        std::unordered_set<intset, IntsetHash> candidate_seen;
+
+        for (int u = 0; u < dfg_.num_nodes(); u++) {
+            if (!valid_[u])
+                continue;
+            if (closures_[u].is_subset_of(state.nodes))
+                continue;
+            if (!can_connect(u, state.nodes))
+                continue;
+
+            intset seed(state.nodes | singleton_set(dfg_.num_nodes(), u));
+            intset closed = closure_for(seed);
+            if (closed == state.nodes || closed.intersects(forbidden_))
+                continue;
+            if (max_subgraph_size_ >= 0 &&
+                closed.size() > static_cast<unsigned>(max_subgraph_size_))
+                continue;
+            if (!candidate_seen.insert(intset(closed)).second)
+                continue;
+
+            intset added(closed);
+            added.remove(state.nodes);
+            unsigned first = added.minimum();
+            if (first == static_cast<unsigned>(-1))
+                continue;
+
+            IOSubgraph config(dfg_, intset(closed));
+            auto key = bucket_key(config);
+            candidates.emplace_back(
+                SearchState(intset(closed)),
+                added.size(),
+                key,
+                sample_count_by_bucket_[key],
+                static_cast<int>(first),
+                is_valid_config(config));
+        }
+
+        return candidates;
+    }
+
+    std::vector<Candidate> select_candidates(std::vector<Candidate> candidates) const
+    {
+        std::unordered_map<
+            std::tuple<unsigned, unsigned, unsigned, unsigned>,
+            std::size_t,
+            NonzeroBucketKeyHash>
+            best_by_bin;
+        std::vector<Candidate> clustered;
+        clustered.reserve(candidates.size());
+
+        for (auto &candidate : candidates) {
+            auto it = best_by_bin.find(candidate.bucket_key);
+            if (it == best_by_bin.end()) {
+                best_by_bin.emplace(candidate.bucket_key, clustered.size());
+                clustered.push_back(std::move(candidate));
+                continue;
+            }
+
+            Candidate &current = clustered[it->second];
+            if ((candidate.emittable && !current.emittable) ||
+                (candidate.emittable == current.emittable &&
+                 candidate.current_bucket_count < current.current_bucket_count) ||
+                (candidate.emittable == current.emittable &&
+                 candidate.current_bucket_count == current.current_bucket_count &&
+                 candidate.delta_size > current.delta_size) ||
+                (candidate.emittable == current.emittable &&
+                 candidate.current_bucket_count == current.current_bucket_count &&
+                 candidate.delta_size == current.delta_size &&
+                 candidate.first_added < current.first_added)) {
+                current = std::move(candidate);
+            }
+        }
+
+        std::sort(
+            clustered.begin(),
+            clustered.end(),
+            [](const Candidate &lhs, const Candidate &rhs) {
+                if (lhs.emittable != rhs.emittable)
+                    return lhs.emittable;
+                if (lhs.current_bucket_count != rhs.current_bucket_count)
+                    return lhs.current_bucket_count < rhs.current_bucket_count;
+                if (lhs.delta_size != rhs.delta_size)
+                    return lhs.delta_size > rhs.delta_size;
+                if (lhs.state.nodes.size() != rhs.state.nodes.size())
+                    return lhs.state.nodes.size() < rhs.state.nodes.size();
+                return lhs.first_added < rhs.first_added;
+            });
+
+        if (clustered.size() > static_cast<std::size_t>(max_children_per_state_)) {
+            clustered.erase(
+                clustered.begin() + static_cast<std::ptrdiff_t>(max_children_per_state_),
+                clustered.end());
+        }
+        return clustered;
+    }
+
+    void emit_thickened(const SearchState &state, int radius)
+    {
+        maybe_emit(state.nodes);
+        if (radius <= 0 || samples_emitted_ >= max_samples_)
+            return;
+
+        auto candidates = select_candidates(build_candidates(state));
+        for (const auto &candidate : candidates) {
+            if (samples_emitted_ >= max_samples_)
+                return;
+            emit_thickened(candidate.state, radius - 1);
+        }
+    }
+
+    void expand(SearchState state)
+    {
+        if (max_subgraph_size_ >= 0 &&
+            state.nodes.size() >= static_cast<unsigned>(max_subgraph_size_))
+            return;
+        if (states_expanded_ >= max_states_expanded_)
+            return;
+
+        states_expanded_++;
+        auto candidates = select_candidates(build_candidates(state));
+        for (const auto &candidate : candidates) {
+            if (samples_emitted_ >= max_samples_)
+                return;
+            emit_thickened(candidate.state, thicken_radius_);
+        }
+        for (auto &candidate : candidates)
+            enqueue_if_new(std::move(candidate.state));
+    }
+
+    const DFG &dfg_;
+    int max_num_in_;
+    int max_num_out_;
+    int max_subgraph_size_;
+    const std::function<void(const IOSubgraph &)> &output_cb_;
+    const DFG *alternate_graph_;
+    int max_states_expanded_;
+    int max_samples_;
+    int max_children_per_state_;
+    int size_bin_width_;
+    int thicken_radius_;
+    bool bucket_by_num_inputs_;
+    bool bucket_by_num_outputs_;
+    int minimal_node_bin_width_;
+    int boundary_pair_samples_;
+    intset forbidden_;
+    std::vector<intset> closures_;
+    std::vector<intset> body_neighbors_;
+    std::vector<bool> valid_;
+    std::unordered_map<intset, intset, IntsetHash> closure_cache_;
+    std::unordered_set<intset, IntsetHash> emitted_;
+    std::unordered_set<intset, IntsetHash> visited_states_;
+    std::deque<SearchState> agenda_;
+    std::unordered_map<
+        std::tuple<unsigned, unsigned, unsigned, unsigned>,
+        unsigned,
+        NonzeroBucketKeyHash>
+        sample_count_by_bucket_;
+    int states_expanded_ = 0;
+    int samples_emitted_ = 0;
+};
+
+class NonzeroOutputGrower {
+public:
+    NonzeroOutputGrower(
+        const DFG &dfg,
+        int max_num_in,
+        int max_num_out,
+        int max_subgraph_size,
+        const DFG *alternate_graph,
+        std::size_t initial_state_token,
+        const std::function<std::optional<std::size_t>(
+            const IOSubgraph &, std::size_t)> &visit_cb)
+        : dfg_(dfg)
+        , max_num_in_(max_num_in)
+        , max_num_out_(max_num_out)
+        , max_subgraph_size_(max_subgraph_size)
+        , alternate_graph_(alternate_graph)
+        , initial_state_token_(initial_state_token)
+        , visit_cb_(visit_cb)
+        , forbidden_(dfg.body_forbidden())
+        , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , body_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
+        , valid_(dfg.num_nodes(), false)
+    {
+        for (int u = 0; u < dfg_.num_nodes(); u++) {
+            closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
+            for (const auto &v : closures_[u]) {
+                for (const auto &w : dfg_.in_edges(v))
+                    body_neighbors_[u].add(w);
+                for (const auto &w : dfg_.out_edges(v))
+                    body_neighbors_[u].add(w);
+            }
+            valid_[u] = !closures_[u].intersects(forbidden_);
+        }
+    }
+
+    void enumerate(const intset &seed)
+    {
+        intset canonical_seed = closure_for(seed);
+        if (!(canonical_seed == seed))
+            throw std::invalid_argument(
+                "seed must already be a canonical dual-convex nonzero-output subgraph");
+        if (!is_valid_state(seed))
+            throw std::invalid_argument(
+                "seed does not satisfy the nonzero-output growth constraints");
+
+        std::vector<std::pair<intset, std::size_t>> stack;
+        stack.emplace_back(seed, initial_state_token_);
+        seen_.insert(intset(seed));
+
+        while (!stack.empty()) {
+            auto [current, state_token] = std::move(stack.back());
+            stack.pop_back();
+
+            IOSubgraph config(dfg_, intset(current));
+            auto next_state_token = visit_cb_(config, state_token);
+            if (!next_state_token.has_value())
+                continue;
+
+            std::vector<std::pair<intset, std::size_t>> next_states;
+            std::unordered_set<intset, IntsetHash> sibling_seen;
+
+            for (int u = 0; u < dfg_.num_nodes(); u++) {
+                if (!valid_[u])
+                    continue;
+                if (closures_[u].is_subset_of(current))
+                    continue;
+                if (!can_connect(u, current))
+                    continue;
+
+                intset next_state =
+                    closure_for(current | singleton_set(dfg_.num_nodes(), u));
+                if (next_state == current)
+                    continue;
+                if (!is_valid_state(next_state))
+                    continue;
+                if (!sibling_seen.insert(intset(next_state)).second)
+                    continue;
+                if (!seen_.insert(intset(next_state)).second)
+                    continue;
+                next_states.emplace_back(std::move(next_state), *next_state_token);
+            }
+
+            std::sort(
+                next_states.begin(),
+                next_states.end(),
+                [](const auto &lhs, const auto &rhs) {
+                    if (lhs.first.size() != rhs.first.size())
+                        return lhs.first.size() > rhs.first.size();
+                    return lhs.first.minimum() > rhs.first.minimum();
+                });
+
+            for (auto &next_state : next_states)
+                stack.push_back(std::move(next_state));
+        }
+    }
+
+private:
+    const intset &closure_for(const intset &nodes)
+    {
+        auto it = closure_cache_.find(nodes);
+        if (it != closure_cache_.end())
+            return it->second;
+        return closure_cache_
+            .emplace(intset(nodes), dual_closure(dfg_, alternate_graph_, nodes))
+            .first->second;
+    }
+
+    bool can_connect(int u, const intset &current_nodes) const
+    {
+        return closures_[u].intersects(current_nodes) ||
+               body_neighbors_[u].intersects(current_nodes);
+    }
+
+    bool is_valid_state(const intset &nodes) const
+    {
+        if (nodes.intersects(forbidden_))
+            return false;
+        IOSubgraph config(dfg_, intset(nodes));
+        if (max_subgraph_size_ >= 0 &&
+            config.nodes().size() > static_cast<unsigned>(max_subgraph_size_))
+            return false;
+        if (config.num_in() > max_num_in_ || config.num_out() == 0 ||
+            config.num_out() > max_num_out_ || has_forbidden_inputs(dfg_, config))
+            return false;
+        return is_weakly_connected_subgraph(dfg_, config.nodes());
+    }
+
+    const DFG &dfg_;
+    int max_num_in_;
+    int max_num_out_;
+    int max_subgraph_size_;
+    const DFG *alternate_graph_;
+    std::size_t initial_state_token_;
+    const std::function<std::optional<std::size_t>(const IOSubgraph &,
+                                                   std::size_t)> &visit_cb_;
+    intset forbidden_;
+    std::vector<intset> closures_;
+    std::vector<intset> body_neighbors_;
+    std::vector<bool> valid_;
+    std::unordered_map<intset, intset, IntsetHash> closure_cache_;
+    std::unordered_set<intset, IntsetHash> seen_;
+};
+
 void vs_enumerate_zero_outputs_(const DFG &dfg,
                                 int max_num_in,
                                 int max_subgraph_size,
@@ -1435,6 +2071,64 @@ void vs_grow_zero_output_connected(
     ZeroOutputGrower(
         dfg,
         max_num_in,
+        max_subgraph_size,
+        alternate_graph,
+        initial_state_token,
+        visit_cb)
+        .enumerate(seed);
+}
+
+void vs_sample_nonzero_output_connected(
+    const DFG &dfg,
+    int max_num_in,
+    int max_num_out,
+    int max_subgraph_size,
+    const DFG *alternate_graph,
+    const std::function<void(const IOSubgraph &)> &output_cb,
+    int max_states_expanded,
+    int max_samples,
+    int max_children_per_state,
+    int size_bin_width,
+    int thicken_radius,
+    bool bucket_by_num_inputs,
+    bool bucket_by_num_outputs,
+    int minimal_node_bin_width,
+    int boundary_pair_samples)
+{
+    SampledNonzeroOutputConnectedFinder(
+        dfg,
+        max_num_in,
+        max_num_out,
+        max_subgraph_size,
+        output_cb,
+        alternate_graph,
+        max_states_expanded,
+        max_samples,
+        max_children_per_state,
+        size_bin_width,
+        thicken_radius,
+        bucket_by_num_inputs,
+        bucket_by_num_outputs,
+        minimal_node_bin_width,
+        boundary_pair_samples)
+        .enumerate();
+}
+
+void vs_grow_nonzero_output_connected(
+    const DFG &dfg,
+    const intset &seed,
+    int max_num_in,
+    int max_num_out,
+    int max_subgraph_size,
+    const DFG *alternate_graph,
+    std::size_t initial_state_token,
+    const std::function<std::optional<std::size_t>(const IOSubgraph &,
+                                                   std::size_t)> &visit_cb)
+{
+    NonzeroOutputGrower(
+        dfg,
+        max_num_in,
+        max_num_out,
         max_subgraph_size,
         alternate_graph,
         initial_state_token,
