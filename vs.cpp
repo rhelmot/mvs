@@ -277,6 +277,23 @@ void remove_nodes(IOSubgraph &config, const intset &nodes)
             config.remove(u);
 }
 
+bool intset_less(const intset &lhs, const intset &rhs)
+{
+    auto lhs_it = lhs.begin();
+    auto lhs_end = lhs.end();
+    auto rhs_it = rhs.begin();
+    auto rhs_end = rhs.end();
+    while (lhs_it != lhs_end && rhs_it != rhs_end) {
+        int lhs_value = *lhs_it;
+        int rhs_value = *rhs_it;
+        if (lhs_value != rhs_value)
+            return lhs_value < rhs_value;
+        ++lhs_it;
+        ++rhs_it;
+    }
+    return lhs_it == lhs_end && rhs_it != rhs_end;
+}
+
 }
 
 static intset singleton_set(unsigned size, int node)
@@ -998,7 +1015,11 @@ private:
                  candidate.delta_size > current.delta_size) ||
                 (candidate.current_bucket_count == current.current_bucket_count &&
                  candidate.delta_size == current.delta_size &&
-                 candidate.first_added < current.first_added)) {
+                 candidate.first_added < current.first_added) ||
+                (candidate.current_bucket_count == current.current_bucket_count &&
+                 candidate.delta_size == current.delta_size &&
+                 candidate.first_added == current.first_added &&
+                 intset_less(candidate.state.nodes, current.state.nodes))) {
                 current = std::move(candidate);
             }
         }
@@ -1013,7 +1034,9 @@ private:
                     return lhs.delta_size > rhs.delta_size;
                 if (lhs.state.nodes.size() != rhs.state.nodes.size())
                     return lhs.state.nodes.size() < rhs.state.nodes.size();
-                return lhs.first_added < rhs.first_added;
+                if (lhs.first_added != rhs.first_added)
+                    return lhs.first_added < rhs.first_added;
+                return intset_less(lhs.state.nodes, rhs.state.nodes);
             });
 
         if (clustered.size() > static_cast<std::size_t>(max_children_per_state_)) {
@@ -1229,7 +1252,9 @@ public:
                 [](const auto &lhs, const auto &rhs) {
                     if (lhs.first.size() != rhs.first.size())
                         return lhs.first.size() > rhs.first.size();
-                    return lhs.first.minimum() > rhs.first.minimum();
+                    if (lhs.first.minimum() != rhs.first.minimum())
+                        return lhs.first.minimum() > rhs.first.minimum();
+                    return intset_less(lhs.first, rhs.first);
                 });
 
             for (auto &next_state : next_states)
@@ -1565,7 +1590,9 @@ private:
                     return lhs.size > rhs.size;
                 if (lhs.output != rhs.output)
                     return lhs.output < rhs.output;
-                return lhs.input > rhs.input;
+                if (lhs.input != rhs.input)
+                    return lhs.input > rhs.input;
+                return intset_less(lhs.nodes, rhs.nodes);
             });
         if (candidates.size() >
             static_cast<std::size_t>(boundary_pair_samples_)) {
@@ -1705,7 +1732,12 @@ private:
                 (candidate.emittable == current.emittable &&
                  candidate.current_bucket_count == current.current_bucket_count &&
                  candidate.delta_size == current.delta_size &&
-                 candidate.first_added < current.first_added)) {
+                 candidate.first_added < current.first_added) ||
+                (candidate.emittable == current.emittable &&
+                 candidate.current_bucket_count == current.current_bucket_count &&
+                 candidate.delta_size == current.delta_size &&
+                 candidate.first_added == current.first_added &&
+                 intset_less(candidate.state.nodes, current.state.nodes))) {
                 current = std::move(candidate);
             }
         }
@@ -1722,7 +1754,9 @@ private:
                     return lhs.delta_size > rhs.delta_size;
                 if (lhs.state.nodes.size() != rhs.state.nodes.size())
                     return lhs.state.nodes.size() < rhs.state.nodes.size();
-                return lhs.first_added < rhs.first_added;
+                if (lhs.first_added != rhs.first_added)
+                    return lhs.first_added < rhs.first_added;
+                return intset_less(lhs.state.nodes, rhs.state.nodes);
             });
 
         if (clustered.size() > static_cast<std::size_t>(max_children_per_state_)) {
@@ -1886,7 +1920,9 @@ public:
                 [](const auto &lhs, const auto &rhs) {
                     if (lhs.first.size() != rhs.first.size())
                         return lhs.first.size() > rhs.first.size();
-                    return lhs.first.minimum() > rhs.first.minimum();
+                    if (lhs.first.minimum() != rhs.first.minimum())
+                        return lhs.first.minimum() > rhs.first.minimum();
+                    return intset_less(lhs.first, rhs.first);
                 });
 
             for (auto &next_state : next_states)

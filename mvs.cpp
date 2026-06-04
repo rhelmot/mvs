@@ -477,6 +477,23 @@ static void dump_s_clusters(const std::vector<SCluster> &s_clusters)
     std::cerr << json.dump() << std::endl;
 }
 
+static bool intset_less(const intset &lhs, const intset &rhs)
+{
+    auto lhs_it = lhs.begin();
+    auto lhs_end = lhs.end();
+    auto rhs_it = rhs.begin();
+    auto rhs_end = rhs.end();
+    while (lhs_it != lhs_end && rhs_it != rhs_end) {
+        int lhs_value = *lhs_it;
+        int rhs_value = *rhs_it;
+        if (lhs_value != rhs_value)
+            return lhs_value < rhs_value;
+        ++lhs_it;
+        ++rhs_it;
+    }
+    return lhs_it == lhs_end && rhs_it != rhs_end;
+}
+
 MVSFinder::MVSFinder(DFG *dfg)
     : dfg_(dfg)
     , config_(*dfg)
@@ -557,6 +574,8 @@ MVSFinder::MVSFinder(DFG *dfg)
     std::sort(mvs_vec_.begin(),
               mvs_vec_.end(),
               [](const IOSubgraph &i1, const IOSubgraph &i2) {
-                  return i1.weight() > i2.weight();
+                  if (i1.weight() != i2.weight())
+                      return i1.weight() > i2.weight();
+                  return intset_less(i1.nodes(), i2.nodes());
               });
 }
