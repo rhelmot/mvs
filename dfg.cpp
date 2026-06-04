@@ -84,7 +84,7 @@ std::unique_ptr<DFG> DFG::make_dfg(std::istream &in,
                 throw std::runtime_error("invalid line");
 
             if (is_forbidden)
-                dfg->set_forbidden(id - 1);
+                dfg->set_body_forbidden(id - 1);
 
             if (set_weights)
                 dfg->weight(id - 1) = strtod(fields[2].c_str(), nullptr);
