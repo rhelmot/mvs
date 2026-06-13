@@ -1644,7 +1644,13 @@ private:
                 keep_boundary_candidate(
                     candidates,
                     BoundaryCandidate(std::move(nodes), input, output));
+                if (candidates.size() >=
+                    static_cast<std::size_t>(boundary_pair_samples_))
+                    break;
             }
+            if (candidates.size() >=
+                static_cast<std::size_t>(boundary_pair_samples_))
+                break;
         }
 
         for (const auto &candidate : candidates) {
