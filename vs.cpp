@@ -431,7 +431,7 @@ void VSFinder::visit(int max_num_in,
         }
 
         if (!connected_only_ ||
-            is_weakly_connected_with_inputs(dfg, config_)) {
+            is_weakly_connected_subgraph(dfg, config_.nodes())) {
             output_cb(config_);
         }
 
@@ -443,18 +443,7 @@ void VSFinder::visit(int max_num_in,
 
     int id = -1;
     auto pred = config_.pred();
-    intset candidates(pred);
-    if (connected_only_) {
-        for (const auto &input : config_.inputs()) {
-            if (input >= dfg.num_nodes())
-                continue;
-            for (const auto &successor : dfg.out_edges(input)) {
-                if (!config_.nodes().contains(successor))
-                    candidates.add(successor);
-            }
-        }
-    }
-    for (const auto &u : candidates) {
+    for (const auto &u : pred) {
         if (!F_.contains(u))
             id = u;
     }
@@ -462,7 +451,7 @@ void VSFinder::visit(int max_num_in,
     if (id == -1) {
         if (!has_forbidden_inputs(dfg, config_) &&
             (!connected_only_ ||
-             is_weakly_connected_with_inputs(dfg, config_))) {
+             is_weakly_connected_subgraph(dfg, config_.nodes()))) {
             output_cb(config_);
         }
 
@@ -483,8 +472,7 @@ void VSFinder::visit(int max_num_in,
     }
     intset F_prev(F_);
     F_.add(id);
-    if (pred.contains(id))
-        F_.add(dfg.pred(id));
+    F_.add(dfg.pred(id));
     visit(max_num_in, output_cb);
     F_ = F_prev;
 }
