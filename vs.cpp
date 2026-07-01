@@ -314,6 +314,7 @@ public:
     VSFinder(const DFG &dfg,
              const Subgraph &outputs,
              const DFG *alternate_graph = nullptr,
+             int max_num_out = 0,
              int max_subgraph_size = -1,
              bool connected_only = false,
              bool seed_sinks = false,
@@ -322,6 +323,7 @@ public:
         , F_(config_exclusion(
               dfg, outputs.nodes(), seed_sinks, propagate_exclusion))
         , alternate_graph_(alternate_graph)
+        , max_num_out_(max_num_out)
         , max_subgraph_size_(max_subgraph_size)
         , connected_only_(connected_only)
         , forbidden_(dfg.body_forbidden())
@@ -335,10 +337,43 @@ private:
     IOSubgraph config_;
     intset F_;
     const DFG *alternate_graph_;
+    int max_num_out_;
     int max_subgraph_size_;
     bool connected_only_;
     intset forbidden_;
+
+    bool is_connected_enough(const IOSubgraph &config) const;
+    bool is_valid_lateral_candidate(const DFG &dfg,
+                                    const intset &nodes,
+                                    int max_num_in) const;
 };
+
+bool VSFinder::is_connected_enough(const IOSubgraph &config) const
+{
+    return is_weakly_connected_with_inputs(config.dfg(), config);
+}
+
+bool VSFinder::is_valid_lateral_candidate(const DFG &dfg,
+                                          const intset &nodes,
+                                          int max_num_in) const
+{
+    if (nodes.intersects(F_) || nodes.intersects(dfg.body_forbidden()))
+        return false;
+    if (max_subgraph_size_ >= 0 &&
+        nodes.size() > static_cast<unsigned>(max_subgraph_size_))
+        return false;
+
+    IOSubgraph candidate(dfg, intset(nodes));
+    for (const auto &input : candidate.inputs()) {
+        if (input >= dfg.num_nodes())
+            return false;
+    }
+    if (candidate.num_in() > max_num_in ||
+        candidate.num_out() > max_num_out_ ||
+        has_forbidden_inputs(dfg, candidate))
+        return false;
+    return is_connected_enough(candidate);
+}
 
 static bool can_still_be_connected(const IOSubgraph &config)
 {
@@ -431,7 +466,7 @@ void VSFinder::visit(int max_num_in,
         }
 
         if (!connected_only_ ||
-            is_weakly_connected_subgraph(dfg, config_.nodes())) {
+            is_connected_enough(config_)) {
             output_cb(config_);
         }
 
@@ -441,17 +476,44 @@ void VSFinder::visit(int max_num_in,
         return;
     }
 
-    int id = -1;
     auto pred = config_.pred();
+    int id = -1;
+    bool id_is_pred = false;
     for (const auto &u : pred) {
-        if (!F_.contains(u))
+        if (!F_.contains(u)) {
             id = u;
+            id_is_pred = true;
+        }
+    }
+
+    if (id == -1 && connected_only_) {
+        intset candidates(dfg.num_nodes());
+        for (const auto &input : config_.inputs()) {
+            if (input >= dfg.num_nodes())
+                continue;
+            for (const auto &successor : dfg.out_edges(input)) {
+                if (config_.nodes().contains(successor) || F_.contains(successor))
+                    continue;
+                intset closed = dual_closure(
+                    dfg,
+                    alternate_graph_,
+                    config_.nodes() |
+                        singleton_set(config_.nodes().max_size(), successor));
+                if (is_valid_lateral_candidate(
+                        dfg, closed, max_num_in))
+                    candidates.add(successor);
+            }
+        }
+        for (const auto &u : candidates) {
+            if (!F_.contains(u))
+                id = u;
+        }
     }
 
     if (id == -1) {
         if (!has_forbidden_inputs(dfg, config_) &&
             (!connected_only_ ||
-             is_weakly_connected_subgraph(dfg, config_.nodes()))) {
+             is_connected_enough(config_))) {
             output_cb(config_);
         }
 
@@ -472,7 +534,8 @@ void VSFinder::visit(int max_num_in,
     }
     intset F_prev(F_);
     F_.add(id);
-    F_.add(dfg.pred(id));
+    if (id_is_pred)
+        F_.add(dfg.pred(id));
     visit(max_num_in, output_cb);
     F_ = F_prev;
 }
@@ -2085,6 +2148,7 @@ void vs_enumerate_(const DFG &dfg,
                 dfg,
                 outputs,
                 alternate_graph,
+                max_num_out,
                 max_subgraph_size,
                 connected_only,
                 seed_sinks,
