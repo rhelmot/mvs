@@ -40,16 +40,18 @@ static bool verify_config(const DFG &dfg, const IOSubgraph &config)
     return config.nodes() == config.closure();
 }
 
-static intset config_exclusion(const DFG &dfg, const intset &config)
+static intset config_exclusion(const DFG &dfg,
+                               const intset &config,
+                               bool seed_sinks)
 {
     intset out(dfg.body_forbidden());
 
-    // The exhaustive enumerator grows subgraphs from candidate outputs.
-    // Upstream assumed graph sinks were already forbidden, which seeded this
-    // exclusion set. When sinks are allowed, seed with actual sinks instead.
-    for (int u = 0; u < dfg.num_nodes(); u++)
-        if (dfg.out_edges(u).empty())
-            out.add(u);
+    if (seed_sinks) {
+        for (int u = 0; u < dfg.num_nodes(); u++) {
+            if (dfg.out_edges(u).empty())
+                out.add(u);
+        }
+    }
 
     for (int b = dfg.num_nodes() - 1; b >= 0; b--)
         if (out.contains(b))
@@ -309,9 +311,10 @@ public:
              const Subgraph &outputs,
              const DFG *alternate_graph = nullptr,
              int max_subgraph_size = -1,
-             bool connected_only = false)
+             bool connected_only = false,
+             bool seed_sinks = false)
         : config_(dfg, dual_closure(dfg, alternate_graph, outputs.nodes()))
-        , F_(config_exclusion(dfg, outputs.nodes()))
+        , F_(config_exclusion(dfg, outputs.nodes(), seed_sinks))
         , alternate_graph_(alternate_graph)
         , max_subgraph_size_(max_subgraph_size)
         , connected_only_(connected_only)
@@ -475,7 +478,8 @@ void vs_enumerate_zero_inputs_(const DFG &dfg,
                                int max_subgraph_size,
                                const DFG *alternate_graph,
                                const std::function<void(const IOSubgraph &)> &output_cb,
-                               bool connected_only)
+                               bool connected_only,
+                               bool seed_sinks)
 {
     intset nodes(dual_closure(dfg, alternate_graph, outputs.nodes()));
     if (max_subgraph_size >= 0 &&
@@ -484,7 +488,7 @@ void vs_enumerate_zero_inputs_(const DFG &dfg,
     if (nodes.intersects(dfg.body_forbidden()))
         return;
 
-    intset F(config_exclusion(dfg, outputs.nodes()));
+    intset F(config_exclusion(dfg, outputs.nodes(), seed_sinks));
 
     while (true) {
         Subgraph config(dfg, intset(nodes));
@@ -2027,7 +2031,9 @@ void vs_enumerate_zero_outputs_(const DFG &dfg,
                 output_cb(original_subgraph);
             }
         },
-        false);
+        false,
+        false,
+        true);
 }
 
 void vs_enumerate_(const DFG &dfg,
@@ -2038,7 +2044,9 @@ void vs_enumerate_(const DFG &dfg,
                    int max_subgraph_size,
                    const DFG *alternate_graph,
                    const std::function<void(const IOSubgraph &)> &output_cb,
-                   bool connected_only)
+                   bool connected_only,
+                   bool broaden_output_seeds,
+                   bool seed_sinks)
 {
     if (max_subgraph_size >= 0 &&
         dual_closure(dfg, alternate_graph, outputs.nodes()).size() >
@@ -2048,15 +2056,30 @@ void vs_enumerate_(const DFG &dfg,
     if (size >= 1) {
         if (max_num_in == 0) {
             vs_enumerate_zero_inputs_(
-                dfg, outputs, max_subgraph_size, alternate_graph, output_cb, connected_only);
+                dfg,
+                outputs,
+                max_subgraph_size,
+                alternate_graph,
+                output_cb,
+                connected_only,
+                seed_sinks);
         } else {
             VSFinder finder(
-                dfg, outputs, alternate_graph, max_subgraph_size, connected_only);
+                dfg,
+                outputs,
+                alternate_graph,
+                max_subgraph_size,
+                connected_only,
+                seed_sinks);
             finder.visit(max_num_in, output_cb);
         }
     }
     if (size < max_num_out) {
-        auto exclusion = config_exclusion(dfg, outputs.nodes());
+        auto exclusion = config_exclusion(dfg, outputs.nodes(), seed_sinks);
+        if (broaden_output_seeds && !dfg.forbid_sources_and_sinks()) {
+            for (int u = 0; u < dfg.num_nodes(); u++)
+                exclusion.add(u);
+        }
         auto pred = outputs.pred();
         intset valid(dfg.num_nodes());
         for (const auto &u : exclusion) {
@@ -2079,7 +2102,9 @@ void vs_enumerate_(const DFG &dfg,
                               max_subgraph_size,
                               alternate_graph,
                               output_cb,
-                              connected_only);
+                              connected_only,
+                              broaden_output_seeds,
+                              seed_sinks);
                 outputs.remove(u);
             }
         }
@@ -2201,7 +2226,9 @@ void vs_enumerate(const DFG &dfg,
                   int max_subgraph_size,
                   const DFG *alternate_graph,
                   const std::function<void(const IOSubgraph &)> &output_cb,
-                  bool connected_only)
+                  bool connected_only,
+                  bool broaden_output_seeds,
+                  bool seed_sinks)
 {
     if (max_num_out == 0) {
         vs_enumerate_zero_outputs_(
@@ -2219,5 +2246,7 @@ void vs_enumerate(const DFG &dfg,
         max_subgraph_size,
         alternate_graph,
         output_cb,
-        connected_only);
+        connected_only,
+        broaden_output_seeds,
+        seed_sinks);
 }

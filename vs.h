@@ -10,7 +10,9 @@ void vs_enumerate(const DFG &dfg,
                   int max_subgraph_size,
                   const DFG *alternate_graph,
                   const std::function<void(const IOSubgraph &)> &output_cb,
-                  bool connected_only = false);
+                  bool connected_only = false,
+                  bool broaden_output_seeds = true,
+                  bool seed_sinks = false);
 
 void vs_sample_zero_output_connected(
     const DFG &dfg,
