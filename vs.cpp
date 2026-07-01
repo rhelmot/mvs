@@ -601,12 +601,16 @@ public:
                               int max_num_in,
                               int max_subgraph_size,
                               const std::function<void(const IOSubgraph &)> &output_cb,
-                              const DFG *alternate_graph = nullptr)
+                              const DFG *alternate_graph = nullptr,
+                              std::size_t max_work = 0,
+                              bool *work_limit_hit = nullptr)
         : dfg_(dfg)
         , max_num_in_(max_num_in)
         , max_subgraph_size_(max_subgraph_size)
         , output_cb_(output_cb)
         , alternate_graph_(alternate_graph)
+        , max_work_(max_work)
+        , work_limit_hit_(work_limit_hit)
         , config_(dfg)
         , forbidden_(dfg.body_forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
@@ -639,6 +643,8 @@ public:
     void enumerate()
     {
         for (int root = 0; root < dfg_.num_nodes(); root++) {
+            if (!consume_work())
+                return;
             if (!valid_[root])
                 continue;
 
@@ -673,7 +679,10 @@ public:
                     frontier.add(u);
             }
 
-            visit(frontier, blocked);
+            if (!visit(frontier, blocked)) {
+                remove_nodes(config_, closures_[root]);
+                return;
+            }
             remove_nodes(config_, closures_[root]);
         }
     }
@@ -700,26 +709,39 @@ private:
                input_neighbors_[u].intersects(current_nodes);
     }
 
+    bool consume_work()
+    {
+        if (max_work_ == 0)
+            return true;
+        if (work_done_++ < max_work_)
+            return true;
+        if (work_limit_hit_ != nullptr)
+            *work_limit_hit_ = true;
+        return false;
+    }
+
     void emit(const IOSubgraph &config)
     {
         if (emitted_.insert(intset(config.nodes())).second)
             output_cb_(config);
     }
 
-    void visit(intset &frontier, const intset &blocked)
+    bool visit(intset &frontier, const intset &blocked)
     {
         if (max_subgraph_size_ >= 0 &&
             config_.nodes().size() >= static_cast<unsigned>(max_subgraph_size_))
-            return;
+            return true;
 
         SearchState state(config_.nodes(), frontier, blocked);
         if (!visited_states_.insert(std::move(state)).second)
-            return;
+            return true;
 
         while (true) {
+            if (!consume_work())
+                return false;
             int next = frontier.minimum();
             if (next == static_cast<unsigned>(-1))
-                return;
+                return true;
 
             frontier.remove(next);
 
@@ -761,7 +783,10 @@ private:
                             frontier_next.add(u);
                     }
 
-                    visit(frontier_next, blocked_next);
+                    if (!visit(frontier_next, blocked_next)) {
+                        remove_nodes(config_, added);
+                        return false;
+                    }
                 }
             }
 
@@ -774,6 +799,9 @@ private:
     int max_subgraph_size_;
     const std::function<void(const IOSubgraph &)> &output_cb_;
     const DFG *alternate_graph_;
+    std::size_t max_work_;
+    bool *work_limit_hit_;
+    std::size_t work_done_ = 0;
     IOSubgraph config_;
     intset forbidden_;
     std::vector<intset> closures_;
@@ -2091,11 +2119,19 @@ void vs_enumerate_zero_outputs_(const DFG &dfg,
                                 int max_subgraph_size,
                                 const DFG *alternate_graph,
                                 const std::function<void(const IOSubgraph &)> &output_cb,
-                                bool connected_only)
+                                bool connected_only,
+                                std::size_t max_work,
+                                bool *work_limit_hit)
 {
     if (connected_only && alternate_graph == nullptr) {
         ZeroOutputConnectedFinder(
-            dfg, max_num_in, max_subgraph_size, output_cb).enumerate();
+            dfg,
+            max_num_in,
+            max_subgraph_size,
+            output_cb,
+            nullptr,
+            max_work,
+            work_limit_hit).enumerate();
         return;
     }
     if (connected_only) {
@@ -2104,7 +2140,9 @@ void vs_enumerate_zero_outputs_(const DFG &dfg,
             max_num_in,
             max_subgraph_size,
             output_cb,
-            alternate_graph).enumerate();
+            alternate_graph,
+            max_work,
+            work_limit_hit).enumerate();
         return;
     }
 
@@ -2339,11 +2377,20 @@ void vs_enumerate(const DFG &dfg,
                   const std::function<void(const IOSubgraph &)> &output_cb,
                   bool connected_only,
                   bool broaden_output_seeds,
-                  bool seed_sinks)
+                  bool seed_sinks,
+                  std::size_t max_work,
+                  bool *work_limit_hit)
 {
     if (max_num_out == 0) {
         vs_enumerate_zero_outputs_(
-            dfg, max_num_in, max_subgraph_size, alternate_graph, output_cb, connected_only);
+            dfg,
+            max_num_in,
+            max_subgraph_size,
+            alternate_graph,
+            output_cb,
+            connected_only,
+            max_work,
+            work_limit_hit);
         return;
     }
 

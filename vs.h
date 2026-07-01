@@ -12,7 +12,9 @@ void vs_enumerate(const DFG &dfg,
                   const std::function<void(const IOSubgraph &)> &output_cb,
                   bool connected_only = false,
                   bool broaden_output_seeds = true,
-                  bool seed_sinks = false);
+                  bool seed_sinks = false,
+                  std::size_t max_work = 0,
+                  bool *work_limit_hit = nullptr);
 
 void vs_sample_zero_output_connected(
     const DFG &dfg,
