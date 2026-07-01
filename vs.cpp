@@ -982,6 +982,24 @@ private:
             minimal_nodes_bin(config.nodes()));
     }
 
+    std::size_t candidate_scan_limit() const
+    {
+        if (max_children_per_state_ <= 0)
+            return 0;
+        return std::max<std::size_t>(
+            64,
+            static_cast<std::size_t>(max_children_per_state_) * 8);
+    }
+
+    std::size_t candidate_pool_limit() const
+    {
+        if (max_children_per_state_ <= 0)
+            return 0;
+        return std::max<std::size_t>(
+            16,
+            static_cast<std::size_t>(max_children_per_state_) * 4);
+    }
+
     void maybe_emit(const intset &nodes)
     {
         if (samples_emitted_ >= max_samples_)
@@ -1016,12 +1034,19 @@ private:
     {
         std::vector<Candidate> candidates;
         intset frontier_remaining(state.frontier);
+        std::size_t frontier_scanned = 0;
+        const std::size_t scan_limit = candidate_scan_limit();
+        const std::size_t pool_limit = candidate_pool_limit();
 
         while (true) {
+            if (frontier_scanned >= scan_limit ||
+                candidates.size() >= pool_limit)
+                break;
             int next = frontier_remaining.minimum();
             if (next == static_cast<unsigned>(-1))
                 break;
             frontier_remaining.remove(next);
+            frontier_scanned++;
 
             intset blocked_next(state.blocked);
             blocked_next.add(next);
