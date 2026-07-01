@@ -364,13 +364,16 @@ bool VSFinder::is_valid_lateral_candidate(const DFG &dfg,
         return false;
 
     IOSubgraph candidate(dfg, intset(nodes));
+    int num_perm_in = 0;
     for (const auto &input : candidate.inputs()) {
-        if (input >= dfg.num_nodes())
-            return false;
+        if (input >= dfg.num_nodes() || F_.contains(input)) {
+            num_perm_in++;
+            if (input < dfg.num_nodes() && dfg.is_input_forbidden(input))
+                return false;
+        }
     }
-    if (candidate.num_in() > max_num_in ||
-        candidate.num_out() > max_num_out_ ||
-        has_forbidden_inputs(dfg, candidate))
+    if (num_perm_in > max_num_in ||
+        candidate.num_out() > max_num_out_)
         return false;
     return is_connected_enough(candidate);
 }
