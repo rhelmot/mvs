@@ -309,6 +309,9 @@ static intset singleton_set(unsigned size, int node)
     return nodes;
 }
 
+struct WorkLimitExceeded {
+};
+
 class VSFinder {
 public:
     VSFinder(const DFG &dfg,
@@ -318,7 +321,10 @@ public:
              int max_subgraph_size = -1,
              bool connected_only = false,
              bool seed_sinks = false,
-             bool propagate_exclusion = true)
+             bool propagate_exclusion = true,
+             std::size_t max_work = 0,
+             std::size_t *work_done = nullptr,
+             bool *work_limit_hit = nullptr)
         : config_(dfg, dual_closure(dfg, alternate_graph, outputs.nodes()))
         , F_(config_exclusion(
               dfg, outputs.nodes(), seed_sinks, propagate_exclusion))
@@ -326,6 +332,9 @@ public:
         , max_num_out_(max_num_out)
         , max_subgraph_size_(max_subgraph_size)
         , connected_only_(connected_only)
+        , max_work_(max_work)
+        , work_done_(work_done)
+        , work_limit_hit_(work_limit_hit)
         , forbidden_(dfg.body_forbidden())
     {
     }
@@ -340,13 +349,28 @@ private:
     int max_num_out_;
     int max_subgraph_size_;
     bool connected_only_;
+    std::size_t max_work_;
+    std::size_t *work_done_;
+    bool *work_limit_hit_;
     intset forbidden_;
 
+    void consume_work();
     bool is_connected_enough(const IOSubgraph &config) const;
     bool is_valid_lateral_candidate(const DFG &dfg,
                                     const intset &nodes,
                                     int max_num_in) const;
 };
+
+void VSFinder::consume_work()
+{
+    if (max_work_ == 0 || work_done_ == nullptr)
+        return;
+    if ((*work_done_)++ < max_work_)
+        return;
+    if (work_limit_hit_ != nullptr)
+        *work_limit_hit_ = true;
+    throw WorkLimitExceeded();
+}
 
 bool VSFinder::is_connected_enough(const IOSubgraph &config) const
 {
@@ -420,6 +444,7 @@ static bool can_still_be_connected(const IOSubgraph &config)
 void VSFinder::visit(int max_num_in,
                      const std::function<void(const IOSubgraph &)> &output_cb)
 {
+    consume_work();
     const DFG &dfg = config_.dfg();
     int num_perm_in = 0;
     if (config_.nodes().intersects(forbidden_))
@@ -2183,7 +2208,10 @@ void vs_enumerate_(const DFG &dfg,
                    const std::function<void(const IOSubgraph &)> &output_cb,
                    bool connected_only,
                    bool broaden_output_seeds,
-                   bool seed_sinks)
+                   bool seed_sinks,
+                   std::size_t max_work,
+                   std::size_t *work_done,
+                   bool *work_limit_hit)
 {
     bool relax_output_exclusion =
         broaden_output_seeds && !dfg.forbid_sources_and_sinks();
@@ -2218,7 +2246,10 @@ void vs_enumerate_(const DFG &dfg,
                 max_subgraph_size,
                 connected_only,
                 seed_sinks,
-                propagate_exclusion);
+                propagate_exclusion,
+                max_work,
+                work_done,
+                work_limit_hit);
             finder.visit(max_num_in, bounded_output_cb);
         }
     }
@@ -2253,7 +2284,10 @@ void vs_enumerate_(const DFG &dfg,
                               output_cb,
                               connected_only,
                               broaden_output_seeds,
-                              seed_sinks);
+                              seed_sinks,
+                              max_work,
+                              work_done,
+                              work_limit_hit);
                 outputs.remove(u);
             }
         }
@@ -2381,30 +2415,39 @@ void vs_enumerate(const DFG &dfg,
                   std::size_t max_work,
                   bool *work_limit_hit)
 {
-    if (max_num_out == 0) {
-        vs_enumerate_zero_outputs_(
+    try {
+        if (max_num_out == 0) {
+            vs_enumerate_zero_outputs_(
+                dfg,
+                max_num_in,
+                max_subgraph_size,
+                alternate_graph,
+                output_cb,
+                connected_only,
+                max_work,
+                work_limit_hit);
+            return;
+        }
+
+        std::size_t work_done = 0;
+        Subgraph outputs(dfg);
+        vs_enumerate_(
             dfg,
+            outputs,
+            0,
             max_num_in,
+            max_num_out,
             max_subgraph_size,
             alternate_graph,
             output_cb,
             connected_only,
+            broaden_output_seeds,
+            seed_sinks,
             max_work,
+            &work_done,
             work_limit_hit);
-        return;
+    } catch (const WorkLimitExceeded &) {
+        if (work_limit_hit != nullptr)
+            *work_limit_hit = true;
     }
-
-    Subgraph outputs(dfg);
-    vs_enumerate_(
-        dfg,
-        outputs,
-        0,
-        max_num_in,
-        max_num_out,
-        max_subgraph_size,
-        alternate_graph,
-        output_cb,
-        connected_only,
-        broaden_output_seeds,
-        seed_sinks);
 }
