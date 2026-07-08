@@ -312,6 +312,19 @@ static intset singleton_set(unsigned size, int node)
 struct WorkLimitExceeded {
 };
 
+static void consume_work(std::size_t max_work,
+                         std::size_t *work_done,
+                         bool *work_limit_hit)
+{
+    if (max_work == 0 || work_done == nullptr)
+        return;
+    if ((*work_done)++ < max_work)
+        return;
+    if (work_limit_hit != nullptr)
+        *work_limit_hit = true;
+    throw WorkLimitExceeded();
+}
+
 class VSFinder {
 public:
     VSFinder(const DFG &dfg,
@@ -363,13 +376,7 @@ private:
 
 void VSFinder::consume_work()
 {
-    if (max_work_ == 0 || work_done_ == nullptr)
-        return;
-    if ((*work_done_)++ < max_work_)
-        return;
-    if (work_limit_hit_ != nullptr)
-        *work_limit_hit_ = true;
-    throw WorkLimitExceeded();
+    ::consume_work(max_work_, work_done_, work_limit_hit_);
 }
 
 bool VSFinder::is_connected_enough(const IOSubgraph &config) const
@@ -577,8 +584,12 @@ void vs_enumerate_zero_inputs_(const DFG &dfg,
                                const std::function<void(const IOSubgraph &)> &output_cb,
                                bool connected_only,
                                bool seed_sinks,
-                               bool propagate_exclusion)
+                               bool propagate_exclusion,
+                               std::size_t max_work,
+                               std::size_t *work_done,
+                               bool *work_limit_hit)
 {
+    consume_work(max_work, work_done, work_limit_hit);
     intset nodes(dual_closure(dfg, alternate_graph, outputs.nodes()));
     if (max_subgraph_size >= 0 &&
         nodes.size() > static_cast<unsigned>(max_subgraph_size))
@@ -590,6 +601,7 @@ void vs_enumerate_zero_inputs_(const DFG &dfg,
         dfg, outputs.nodes(), seed_sinks, propagate_exclusion));
 
     while (true) {
+        consume_work(max_work, work_done, work_limit_hit);
         Subgraph config(dfg, intset(nodes));
         intset pred(config.pred());
         intset addable(pred);
@@ -2195,7 +2207,9 @@ void vs_enumerate_zero_outputs_(const DFG &dfg,
         },
         false,
         false,
-        true);
+        true,
+        max_work,
+        work_limit_hit);
 }
 
 void vs_enumerate_(const DFG &dfg,
@@ -2236,7 +2250,10 @@ void vs_enumerate_(const DFG &dfg,
                 bounded_output_cb,
                 connected_only,
                 seed_sinks,
-                propagate_exclusion);
+                propagate_exclusion,
+                max_work,
+                work_done,
+                work_limit_hit);
         } else {
             VSFinder finder(
                 dfg,
