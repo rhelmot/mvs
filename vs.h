@@ -14,7 +14,8 @@ void vs_enumerate(const DFG &dfg,
                   bool broaden_output_seeds = true,
                   bool seed_sinks = false,
                   std::size_t max_work = 0,
-                  bool *work_limit_hit = nullptr);
+                  bool *work_limit_hit = nullptr,
+                  bool relax_output_seed_limit = false);
 
 void vs_sample_zero_output_connected(
     const DFG &dfg,

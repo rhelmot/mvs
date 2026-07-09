@@ -2356,6 +2356,182 @@ void vs_enumerate_(const DFG &dfg,
 
 }
 
+static bool alternate_boundary_config_is_valid(const DFG &dfg,
+                                               const DFG &alternate_graph,
+                                               const intset &nodes,
+                                               int max_num_in,
+                                               int max_num_out,
+                                               int max_subgraph_size)
+{
+    if (max_subgraph_size >= 0 &&
+        nodes.size() > static_cast<unsigned>(max_subgraph_size))
+        return false;
+    if (nodes.intersects(dfg.body_forbidden()))
+        return false;
+
+    IOSubgraph config(dfg, intset(nodes));
+    if (config.num_out() == 0 || config.num_out() > max_num_out ||
+        config.num_in() > max_num_in || has_forbidden_inputs(dfg, config))
+        return false;
+
+    IOSubgraph alternate_config(alternate_graph, intset(nodes));
+    return is_weakly_connected_with_inputs(alternate_graph, alternate_config);
+}
+
+static intset alternate_input_boundary_closure(const DFG &dfg,
+                                               const DFG &alternate_graph,
+                                               int excluded_input,
+                                               int terminal,
+                                               bool include_alternate_successors,
+                                               int max_subgraph_size,
+                                               std::size_t max_work,
+                                               std::size_t *work_done,
+                                               bool *work_limit_hit)
+{
+    intset nodes(singleton_set(dfg.num_nodes(), terminal));
+    while (true) {
+        consume_work(max_work, work_done, work_limit_hit);
+        intset next(nodes);
+        for (const auto &u : nodes) {
+            if (u != terminal) {
+                for (const auto &successor : dfg.out_edges(u))
+                    next.add(successor);
+            }
+            for (const auto &predecessor : alternate_graph.in_edges(u)) {
+                if (predecessor != excluded_input)
+                    next.add(predecessor);
+            }
+            if (include_alternate_successors) {
+                for (const auto &successor : alternate_graph.out_edges(u))
+                    next.add(successor);
+            }
+        }
+        next.remove(dfg.body_forbidden());
+        next = dual_closure(dfg, &alternate_graph, next);
+        if (next == nodes)
+            return nodes;
+        if (max_subgraph_size >= 0 &&
+            next.size() > static_cast<unsigned>(max_subgraph_size))
+            return next;
+        if (next.intersects(dfg.body_forbidden()))
+            return next;
+        nodes = std::move(next);
+    }
+}
+
+static void emit_alternate_boundary_candidates(
+    const DFG &dfg,
+    const DFG &alternate_graph,
+    int max_num_in,
+    int max_num_out,
+    int max_subgraph_size,
+    const std::function<void(const IOSubgraph &)> &output_cb,
+    std::size_t max_work,
+    std::size_t *work_done,
+    bool *work_limit_hit)
+{
+    std::unordered_set<intset, IntsetHash> seen;
+    auto maybe_emit = [&](const intset &nodes) {
+        consume_work(max_work, work_done, work_limit_hit);
+        if (!seen.insert(intset(nodes)).second)
+            return;
+        if (!alternate_boundary_config_is_valid(
+                dfg, alternate_graph, nodes, max_num_in, max_num_out, max_subgraph_size))
+            return;
+        output_cb(IOSubgraph(dfg, intset(nodes)));
+    };
+
+    for (int excluded_input = 0; excluded_input < alternate_graph.num_nodes();
+         excluded_input++) {
+        consume_work(max_work, work_done, work_limit_hit);
+        std::vector<int> successors;
+        for (const auto &successor : alternate_graph.out_edges(excluded_input)) {
+            if (!dfg.is_body_forbidden(successor))
+                successors.push_back(successor);
+        }
+        if (!successors.empty()) {
+            intset seed(dfg.num_nodes());
+            for (const auto &successor : successors)
+                seed.add(successor);
+            maybe_emit(dual_closure(dfg, &alternate_graph, seed));
+        }
+        for (std::size_t i = 0; i < successors.size(); i++) {
+            for (std::size_t j = i + 1; j < successors.size(); j++) {
+                intset seed(singleton_set(dfg.num_nodes(), successors[i]));
+                seed.add(successors[j]);
+                maybe_emit(dual_closure(dfg, &alternate_graph, seed));
+            }
+        }
+    }
+
+    auto visit_terminals = [&](bool require_primary_output) {
+        for (int terminal = 0; terminal < dfg.num_nodes(); terminal++) {
+            if (dfg.is_body_forbidden(terminal))
+                continue;
+            if (require_primary_output && dfg.out_edges(terminal).empty())
+                continue;
+            intset excluded_inputs(alternate_graph.num_nodes());
+            for (const auto &excluded_input : alternate_graph.pred(terminal)) {
+                if (alternate_graph.out_edges(excluded_input).empty())
+                    continue;
+                excluded_inputs.add(excluded_input);
+                consume_work(max_work, work_done, work_limit_hit);
+                maybe_emit(alternate_input_boundary_closure(
+                    dfg,
+                    alternate_graph,
+                    excluded_input,
+                    terminal,
+                    false,
+                    max_subgraph_size,
+                    max_work,
+                    work_done,
+                    work_limit_hit));
+                maybe_emit(alternate_input_boundary_closure(
+                    dfg,
+                    alternate_graph,
+                    excluded_input,
+                    terminal,
+                    true,
+                    max_subgraph_size,
+                    max_work,
+                    work_done,
+                    work_limit_hit));
+            }
+            for (int excluded_input = 0; excluded_input < alternate_graph.num_nodes();
+                 excluded_input++) {
+                if (excluded_inputs.contains(excluded_input))
+                    continue;
+                if (alternate_graph.out_edges(excluded_input).empty())
+                    continue;
+                consume_work(max_work, work_done, work_limit_hit);
+                maybe_emit(alternate_input_boundary_closure(
+                    dfg,
+                    alternate_graph,
+                    excluded_input,
+                    terminal,
+                    false,
+                    max_subgraph_size,
+                    max_work,
+                    work_done,
+                    work_limit_hit));
+                maybe_emit(alternate_input_boundary_closure(
+                    dfg,
+                    alternate_graph,
+                    excluded_input,
+                    terminal,
+                    true,
+                    max_subgraph_size,
+                    max_work,
+                    work_done,
+                    work_limit_hit));
+            }
+        }
+    };
+
+    visit_terminals(true);
+    visit_terminals(false);
+}
+
 void vs_sample_zero_output_connected(
     const DFG &dfg,
     int max_num_in,
@@ -2480,9 +2656,11 @@ void vs_enumerate(const DFG &dfg,
                   bool broaden_output_seeds,
                   bool seed_sinks,
                   std::size_t max_work,
-                  bool *work_limit_hit)
+                  bool *work_limit_hit,
+                  bool relax_output_seed_limit)
 {
     try {
+        std::size_t work_done = 0;
         if (max_num_out == 0) {
             vs_enumerate_zero_outputs_(
                 dfg,
@@ -2496,7 +2674,21 @@ void vs_enumerate(const DFG &dfg,
             return;
         }
 
-        std::size_t work_done = 0;
+        if (relax_output_seed_limit && alternate_graph != nullptr) {
+            std::size_t boundary_max_work =
+                dfg.num_nodes() <= 512 ? 0 : max_work;
+            emit_alternate_boundary_candidates(
+                dfg,
+                *alternate_graph,
+                max_num_in,
+                max_num_out,
+                max_subgraph_size,
+                output_cb,
+                boundary_max_work,
+                boundary_max_work == 0 ? nullptr : &work_done,
+                boundary_max_work == 0 ? nullptr : work_limit_hit);
+        }
+
         Subgraph outputs(dfg);
         vs_enumerate_(
             dfg,
