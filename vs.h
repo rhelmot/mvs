@@ -28,7 +28,8 @@ void vs_sample_zero_output_connected(
     int size_bin_width,
     int thicken_radius,
     bool bucket_by_num_inputs,
-    int minimal_node_bin_width);
+    int minimal_node_bin_width,
+    std::size_t max_work = 0);
 
 void vs_grow_zero_output_connected(
     const DFG &dfg,
@@ -55,7 +56,8 @@ void vs_sample_nonzero_output_connected(
     bool bucket_by_num_inputs,
     bool bucket_by_num_outputs,
     int minimal_node_bin_width,
-    int boundary_pair_samples);
+    int boundary_pair_samples,
+    std::size_t max_work = 0);
 
 void vs_grow_nonzero_output_connected(
     const DFG &dfg,

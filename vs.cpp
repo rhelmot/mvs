@@ -864,7 +864,8 @@ public:
                                      int size_bin_width,
                                      int thicken_radius,
                                      bool bucket_by_num_inputs,
-                                     int minimal_node_bin_width)
+                                     int minimal_node_bin_width,
+                                     std::size_t max_work = 0)
         : dfg_(dfg)
         , max_num_in_(max_num_in)
         , max_subgraph_size_(max_subgraph_size)
@@ -877,6 +878,7 @@ public:
         , thicken_radius_(thicken_radius)
         , bucket_by_num_inputs_(bucket_by_num_inputs)
         , minimal_node_bin_width_(minimal_node_bin_width)
+        , max_work_(max_work)
         , forbidden_(dfg.body_forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , augmented_closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
@@ -885,6 +887,7 @@ public:
         , valid_(dfg.num_nodes(), false)
     {
         for (int u = 0; u < dfg_.num_nodes(); u++) {
+            consume_work();
             closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
             augmented_closures_[u] = augmented_nodes(dfg_, closures_[u]);
             intset inputs(augmented_closures_[u]);
@@ -911,6 +914,7 @@ public:
             return;
 
         for (int root = 0; root < dfg_.num_nodes(); root++) {
+            consume_work();
             if (!valid_[root])
                 continue;
 
@@ -928,6 +932,7 @@ public:
 
             intset current_augmented = augmented_nodes(dfg_, root_state.nodes);
             for (int u = root + 1; u < dfg_.num_nodes(); u++) {
+                consume_work();
                 if (!valid_[u] || root_state.blocked.contains(u))
                     continue;
                 if (closures_[u].is_subset_of(root_state.nodes))
@@ -1000,9 +1005,15 @@ private:
         auto it = closure_cache_.find(nodes);
         if (it != closure_cache_.end())
             return it->second;
+        consume_work();
         return closure_cache_
             .emplace(intset(nodes), zero_output_closure(dfg_, alternate_graph_, nodes))
             .first->second;
+    }
+
+    void consume_work()
+    {
+        ::consume_work(max_work_, &work_done_, nullptr);
     }
 
     bool can_connect(int u,
@@ -1104,6 +1115,7 @@ private:
         const std::size_t pool_limit = candidate_pool_limit();
 
         while (true) {
+            consume_work();
             if (frontier_scanned >= scan_limit ||
                 candidates.size() >= pool_limit)
                 break;
@@ -1140,6 +1152,7 @@ private:
             intset frontier_next(frontier_remaining);
             intset current_augmented = augmented_nodes(dfg_, config.nodes());
             for (int u = next + 1; u < dfg_.num_nodes(); u++) {
+                consume_work();
                 if (!valid_[u] || blocked_next.contains(u) || frontier_next.contains(u))
                     continue;
                 if (closures_[u].is_subset_of(config.nodes()))
@@ -1159,7 +1172,7 @@ private:
         return candidates;
     }
 
-    std::vector<Candidate> select_candidates(std::vector<Candidate> candidates) const
+    std::vector<Candidate> select_candidates(std::vector<Candidate> candidates)
     {
         std::unordered_map<
             std::tuple<unsigned, unsigned, unsigned>,
@@ -1170,6 +1183,7 @@ private:
         clustered.reserve(candidates.size());
 
         for (auto &candidate : candidates) {
+            consume_work();
             auto it = best_by_bin.find(candidate.bucket_key);
             if (it == best_by_bin.end()) {
                 best_by_bin.emplace(candidate.bucket_key, clustered.size());
@@ -1217,6 +1231,7 @@ private:
 
     void emit_thickened(const SearchState &state, int radius)
     {
+        consume_work();
         maybe_emit(state.nodes);
         if (radius <= 0 || samples_emitted_ >= max_samples_ ||
             (max_subgraph_size_ >= 0 &&
@@ -1239,6 +1254,7 @@ private:
 
         while (states_expanded_ < max_states_expanded_ &&
                samples_emitted_ < max_samples_) {
+            consume_work();
             states_expanded_++;
 
             auto candidates = select_candidates(build_candidates(state));
@@ -1277,6 +1293,8 @@ private:
     int thicken_radius_;
     bool bucket_by_num_inputs_;
     int minimal_node_bin_width_;
+    std::size_t max_work_;
+    std::size_t work_done_ = 0;
     intset forbidden_;
     std::vector<intset> closures_;
     std::vector<intset> augmented_closures_;
@@ -1305,22 +1323,27 @@ void vs_sample_zero_output_connected_(
     int size_bin_width,
     int thicken_radius,
     bool bucket_by_num_inputs,
-    int minimal_node_bin_width)
+    int minimal_node_bin_width,
+    std::size_t max_work)
 {
-    SampledZeroOutputConnectedFinder(
-        dfg,
-        max_num_in,
-        max_subgraph_size,
-        output_cb,
-        alternate_graph,
-        max_states_expanded,
-        max_samples,
-        max_children_per_state,
-        size_bin_width,
-        thicken_radius,
-        bucket_by_num_inputs,
-        minimal_node_bin_width)
-        .enumerate();
+    try {
+        SampledZeroOutputConnectedFinder(
+            dfg,
+            max_num_in,
+            max_subgraph_size,
+            output_cb,
+            alternate_graph,
+            max_states_expanded,
+            max_samples,
+            max_children_per_state,
+            size_bin_width,
+            thicken_radius,
+            bucket_by_num_inputs,
+            minimal_node_bin_width,
+            max_work)
+            .enumerate();
+    } catch (const WorkLimitExceeded &) {
+    }
 }
 
 class ZeroOutputGrower {
@@ -1511,7 +1534,8 @@ public:
         bool bucket_by_num_inputs,
         bool bucket_by_num_outputs,
         int minimal_node_bin_width,
-        int boundary_pair_samples)
+        int boundary_pair_samples,
+        std::size_t max_work = 0)
         : dfg_(dfg)
         , max_num_in_(max_num_in)
         , max_num_out_(max_num_out)
@@ -1527,12 +1551,14 @@ public:
         , bucket_by_num_outputs_(bucket_by_num_outputs)
         , minimal_node_bin_width_(minimal_node_bin_width)
         , boundary_pair_samples_(boundary_pair_samples)
+        , max_work_(max_work)
         , forbidden_(dfg.body_forbidden())
         , closures_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , body_neighbors_(dfg.num_nodes(), intset(dfg.num_nodes()))
         , valid_(dfg.num_nodes(), false)
     {
         for (int u = 0; u < dfg_.num_nodes(); u++) {
+            consume_work();
             closures_[u] = closure_for(singleton_set(dfg_.num_nodes(), u));
             for (const auto &v : closures_[u]) {
                 for (const auto &w : dfg_.in_edges(v))
@@ -1556,6 +1582,7 @@ public:
             return;
 
         for (int root = 0; root < dfg_.num_nodes(); root++) {
+            consume_work();
             if (!valid_[root])
                 continue;
             if (max_subgraph_size_ >= 0 &&
@@ -1643,9 +1670,15 @@ private:
         auto it = closure_cache_.find(nodes);
         if (it != closure_cache_.end())
             return it->second;
+        consume_work();
         return closure_cache_
             .emplace(intset(nodes), dual_closure(dfg_, alternate_graph_, nodes))
             .first->second;
+    }
+
+    void consume_work()
+    {
+        ::consume_work(max_work_, &work_done_, nullptr);
     }
 
     bool can_connect(int u, const intset &current_nodes) const
@@ -1658,6 +1691,7 @@ private:
     {
         intset nodes(singleton_set(dfg_.num_nodes(), output));
         while (true) {
+            consume_work();
             intset next(nodes);
             for (const auto &u : nodes) {
                 for (const auto &p : dfg_.in_edges(u))
@@ -1776,6 +1810,7 @@ private:
         static constexpr std::size_t max_transitive_inputs_per_output = 32;
         std::vector<BoundaryCandidate> candidates;
         for (int output = 0; output < dfg_.num_nodes(); output++) {
+            consume_work();
             if (dfg_.is_body_forbidden(output))
                 continue;
 
@@ -1787,6 +1822,7 @@ private:
             std::unordered_set<int> seen_inputs(inputs.begin(), inputs.end());
             std::vector<int> transitive_inputs;
             for (const auto &input : dfg_.pred(output)) {
+                consume_work();
                 if (seen_inputs.find(input) != seen_inputs.end())
                     continue;
                 transitive_inputs.push_back(input);
@@ -1801,6 +1837,7 @@ private:
                 inputs.end(), transitive_inputs.begin(), transitive_inputs.end());
 
             for (const auto &input : inputs) {
+                consume_work();
                 if (input < dfg_.num_nodes() && dfg_.is_input_forbidden(input))
                     continue;
                 intset nodes = boundary_pair_closure(input, output);
@@ -1841,6 +1878,7 @@ private:
         std::unordered_set<intset, IntsetHash> candidate_seen;
 
         for (int u = 0; u < dfg_.num_nodes(); u++) {
+            consume_work();
             if (!valid_[u])
                 continue;
             if (closures_[u].is_subset_of(state.nodes))
@@ -1878,7 +1916,7 @@ private:
         return candidates;
     }
 
-    std::vector<Candidate> select_candidates(std::vector<Candidate> candidates) const
+    std::vector<Candidate> select_candidates(std::vector<Candidate> candidates)
     {
         std::unordered_map<
             std::tuple<unsigned, unsigned, unsigned, unsigned>,
@@ -1889,6 +1927,7 @@ private:
         clustered.reserve(candidates.size());
 
         for (auto &candidate : candidates) {
+            consume_work();
             auto it = best_by_bin.find(candidate.bucket_key);
             if (it == best_by_bin.end()) {
                 best_by_bin.emplace(candidate.bucket_key, clustered.size());
@@ -1943,6 +1982,7 @@ private:
 
     void emit_thickened(const SearchState &state, int radius)
     {
+        consume_work();
         maybe_emit(state.nodes);
         if (radius <= 0 || samples_emitted_ >= max_samples_)
             return;
@@ -1957,6 +1997,7 @@ private:
 
     void expand(SearchState state)
     {
+        consume_work();
         if (max_subgraph_size_ >= 0 &&
             state.nodes.size() >= static_cast<unsigned>(max_subgraph_size_))
             return;
@@ -1989,6 +2030,8 @@ private:
     bool bucket_by_num_outputs_;
     int minimal_node_bin_width_;
     int boundary_pair_samples_;
+    std::size_t max_work_;
+    std::size_t work_done_ = 0;
     intset forbidden_;
     std::vector<intset> closures_;
     std::vector<intset> body_neighbors_;
@@ -2325,7 +2368,8 @@ void vs_sample_zero_output_connected(
     int size_bin_width,
     int thicken_radius,
     bool bucket_by_num_inputs,
-    int minimal_node_bin_width)
+    int minimal_node_bin_width,
+    std::size_t max_work)
 {
     vs_sample_zero_output_connected_(
         dfg,
@@ -2339,7 +2383,8 @@ void vs_sample_zero_output_connected(
         size_bin_width,
         thicken_radius,
         bucket_by_num_inputs,
-        minimal_node_bin_width);
+        minimal_node_bin_width,
+        max_work);
 }
 
 void vs_grow_zero_output_connected(
@@ -2377,25 +2422,30 @@ void vs_sample_nonzero_output_connected(
     bool bucket_by_num_inputs,
     bool bucket_by_num_outputs,
     int minimal_node_bin_width,
-    int boundary_pair_samples)
+    int boundary_pair_samples,
+    std::size_t max_work)
 {
-    SampledNonzeroOutputConnectedFinder(
-        dfg,
-        max_num_in,
-        max_num_out,
-        max_subgraph_size,
-        output_cb,
-        alternate_graph,
-        max_states_expanded,
-        max_samples,
-        max_children_per_state,
-        size_bin_width,
-        thicken_radius,
-        bucket_by_num_inputs,
-        bucket_by_num_outputs,
-        minimal_node_bin_width,
-        boundary_pair_samples)
-        .enumerate();
+    try {
+        SampledNonzeroOutputConnectedFinder(
+            dfg,
+            max_num_in,
+            max_num_out,
+            max_subgraph_size,
+            output_cb,
+            alternate_graph,
+            max_states_expanded,
+            max_samples,
+            max_children_per_state,
+            size_bin_width,
+            thicken_radius,
+            bucket_by_num_inputs,
+            bucket_by_num_outputs,
+            minimal_node_bin_width,
+            boundary_pair_samples,
+            max_work)
+            .enumerate();
+    } catch (const WorkLimitExceeded &) {
+    }
 }
 
 void vs_grow_nonzero_output_connected(
