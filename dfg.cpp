@@ -1,17 +1,17 @@
 /* Copyright (C) 2013-2019 Emanuele Giaquinta
 
-   This program is free software; you can redistribute it and/or modify it
-   under the terms of the GNU General Public License as published by the
-   Free Software Foundation; either version 2, or (at your option) any
-   later version.
+    This program is free software; you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by the
+    Free Software Foundation; either version 2, or (at your option) any
+    later version.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
 
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, see <http://www.gnu.org/licenses/>.  */
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, see <http://www.gnu.org/licenses/>.  */
 
 #include "dfg.h"
 #include "common.h"
@@ -167,6 +167,8 @@ void DFSVisitor::i_visit(const DFG &dfg,
     }
 }
 
+// all nodes which are immediate predecessors of the subgraph while not already
+// being in the subgraph
 intset Subgraph::pred() const
 {
     intset out(dfg_->num_nodes());
@@ -176,6 +178,8 @@ intset Subgraph::pred() const
     return out.remove(nodes_);
 }
 
+// all nodes which are immediate successors of the subgraph while not already
+// being in the subgraph
 intset Subgraph::succ() const
 {
     intset out(dfg_->num_nodes());
@@ -185,9 +189,10 @@ intset Subgraph::succ() const
     return out.remove(nodes_);
 }
 
+// it's not clear why this is a correct implementation of convex-closure...
 intset Subgraph::closure() const
 {
-    return nodes_ | pred() & succ();
+    return nodes_ | (pred() & succ());
 }
 
 void IOSubgraph::init_weight()
@@ -244,40 +249,44 @@ void IOSubgraph::init_io()
     }
 }
 
+// this must be called after u has been added (add=true) or removed (add=false) from nodes_
 void IOSubgraph::update_io(int u, bool add)
 {
+    // update whether this node is now an input or output
     if (has_internal_successor(*dfg_, nodes_, u, u)) {
-        if (!add)
+        if (!add) // if this node is being removed it may now count as an input
             inputs_.add(u);
-        else
+        else  // if this node is being added it may no longer count as an input
             inputs_.remove(u);
     }
 
     if (has_external_successor(*dfg_, nodes_, u, u)) {
-        if (add)
+        if (add)  // if this node is being added it may now count as an output
             outputs_.add(u);
-        else
+        else  // if this node is being removed it may no longer count as an output
             outputs_.remove(u);
     }
 
+    // update whether each of this node's predecessors are now inputs or outputs
     for (auto &v : dfg_->in_edges(u)) {
-        if (v >= dfg_->num_nodes() || !nodes_.contains(v)) {
+        if (v >= dfg_->num_nodes() || !nodes_.contains(v)) {  // if the pred is not in the subgraph
             if (!has_internal_successor(*dfg_, nodes_, v, u)) {
-                if (add)
+                if (add)  // if the node is being added the pred may count as an input
                     inputs_.add(v);
-                else
+                else  // if the node is being removed the pred may no longer count as an input
                     inputs_.remove(v);
             }
-        } else {
+        } else {  // if the pred is in the subgraph
             if (!has_external_successor(*dfg_, nodes_, v, u)) {
-                if (!add)
+                if (!add)  // if the node is being removed the pred may count as an output
                     outputs_.add(v);
-                else
+                else  // if the node is being added the pred may no longer count as an output
                     outputs_.remove(v);
             }
         }
     }
 
+    // recompute from scratch (expensive, sanity check)
     if (VERIFY) {
         vset<int> inputs;
         vset<int> outputs;

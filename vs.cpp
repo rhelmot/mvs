@@ -1,17 +1,17 @@
 /* Copyright (C) 2014-2019 Emanuele Giaquinta
 
-   This program is free software; you can redistribute it and/or modify it
-   under the terms of the GNU General Public License as published by the
-   Free Software Foundation; either version 2, or (at your option) any
-   later version.
+    This program is free software; you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by the
+    Free Software Foundation; either version 2, or (at your option) any
+    later version.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
 
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, see <http://www.gnu.org/licenses/>.  */
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, see <http://www.gnu.org/licenses/>.  */
 
 #include "vs.h"
 #include "dfg.h"
@@ -26,21 +26,30 @@ static const bool VERIFY = false;
 
 static bool verify_config(const DFG &dfg, const IOSubgraph &config)
 {
+    // assert no forbidden nodes in config
     if (config.nodes().intersects(dfg.forbidden()))
         return false;
 
+    // assert config is already closed (itself convex?)
     return config.nodes() == config.closure();
 }
 
+// this is the exclude_F function from the paper
+// find all nodes for which there is a path from it to a forbidden node
+// that does not go through the selected subgraph
 static intset config_exclusion(const DFG &dfg, const intset &config)
 {
-    intset out(dfg.forbidden());
+    intset out(dfg.forbidden()); // L <- F
 
+    // enumerate all edges in reverse topological order
     for (int b = dfg.num_nodes() - 1; b >= 0; b--)
-        if (out.contains(b))
+        // only care about edges with b in out (L)
+        // this works because a) reverse toposort b) we require all nodes with
+        // no predecessors are forbidden
+        if (out.contains(b))  
             for (auto &a : dfg.in_edges(b)) {
                 if (a < dfg.num_nodes() && !config.contains(a))
-                    out.add(a);
+                    out.add(a);  // if (a not in config (Q)) { L <- L OR {a} }
             }
 
     return out;
@@ -72,9 +81,12 @@ void VSFinder::visit(int max_num_in,
             num_perm_in++;
     }
 
+    // this branch has too many inputs, don't bother looking further
     if (num_perm_in > max_num_in)
         return;
 
+    // find the best-ish (better than optimal) pivot node
+    // any predecessor which is not currently-excluded
     int id = -1;
     auto pred = config_.pred();
     for (const auto &u : pred) {
@@ -83,6 +95,7 @@ void VSFinder::visit(int max_num_in,
     }
 
     if (id == -1) {
+        // no pivot found, this is a leaf! send it!
         output_cb(config_);
 
         if (VERIFY)
@@ -91,19 +104,23 @@ void VSFinder::visit(int max_num_in,
         return;
     }
 
+    // recurse twice, once adding the pivot to the working set...
     config_.add(id);
     visit(max_num_in, output_cb);
 
+    //  ...and once adding the pivot to the excluded set
     config_.remove(id);
     intset F_prev(F_);
     F_.add(id);
-    F_.add(dfg.pred(id));
+    F_.add(dfg.pred(id));  // also exclude preds of the pivot?
     visit(max_num_in, output_cb);
     F_ = F_prev;
 }
 
 namespace {
 
+// this computes valOutputs from the paper
+// and then for each valid output set calls VSFinder::visit
 void vs_enumerate_(const DFG &dfg,
                    Subgraph &outputs,
                    int size,
@@ -112,12 +129,20 @@ void vs_enumerate_(const DFG &dfg,
                    const std::function<void(const IOSubgraph &)> &output_cb)
 {
     if (size >= 1) {
+        // find convex subgraphs with this output set
         VSFinder finder(dfg, outputs);
         finder.visit(max_num_in, output_cb);
     }
-    if (size < max_num_out) {
+
+    // don't bother trying to recurse (add output nodes) if we have too many
+    if (size < max_num_out) {  
         auto exclusion = config_exclusion(dfg, outputs.nodes());
         auto pred = outputs.pred();
+
+        // valid nodes: currently-excluded nodes which are not globally
+        // forbidden and which are not both a predecessor of the current output
+        // set and having a successor which is both a predecessor of the
+        // current output set and currently-excluded
         intset valid(dfg.num_nodes());
         for (const auto &u : exclusion) {
             if (!dfg.is_forbidden(u) &&
@@ -125,11 +150,14 @@ void vs_enumerate_(const DFG &dfg,
                 valid.add(u);
         }
 
+        // we only need to enumerate up to the smallest (toposorted)
+        // preexisting output
         unsigned min = outputs.nodes().minimum();
         for (int u = 0; u < dfg.num_nodes(); u++) {
             if (min != -1 && u >= min)
                 break;
             if (valid.contains(u)) {
+                // recurse with the single added output node
                 outputs.add(u);
                 vs_enumerate_(dfg,
                               outputs,
@@ -145,11 +173,13 @@ void vs_enumerate_(const DFG &dfg,
 
 }
 
+// main entry point
 void vs_enumerate(const DFG &dfg,
                   int max_num_in,
                   int max_num_out,
                   const std::function<void(const IOSubgraph &)> &output_cb)
 {
+    // begin with an empty output set
     Subgraph outputs(dfg);
     vs_enumerate_(dfg, outputs, 0, max_num_in, max_num_out, output_cb);
 }
