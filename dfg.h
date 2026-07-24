@@ -37,7 +37,9 @@ public:
     void add_edge(int u, int v)
     {
         nodes_[u].out_list.add(v);
+        nodes_[u].succ.add(v);
         nodes_[v].in_list.add(u);
+        nodes_[v].pred.add(u);
     }
     void remove_edge(int u, int v)
     {

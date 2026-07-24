@@ -12,6 +12,10 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(json)
 link_libraries(nlohmann_json::nlohmann_json)
 
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  add_compile_options(-O0)
+endif()
+
 add_library(graph STATIC
   common.cpp
   cluster.cpp
