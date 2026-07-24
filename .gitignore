@@ -1,0 +1,14 @@
+build
+.cmake
+.ninja_*
+.skbuild*
+CMakeCache.txt
+CMakeFiles
+CMakeInit.txt
+*.so
+*.o
+_deps
+build.ninja
+compile_commands.json
+CTestTestfile.cmake
+cmake_install.cmake

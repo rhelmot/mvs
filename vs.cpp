@@ -183,3 +183,42 @@ void vs_enumerate(const DFG &dfg,
     Subgraph outputs(dfg);
     vs_enumerate_(dfg, outputs, 0, max_num_in, max_num_out, output_cb);
 }
+
+extern "C" {
+    typedef void (*cse_output_cb)(int num_nodes, int *nodes);
+    typedef struct node_t {
+        bool forbidden;
+    } node_t;
+    typedef struct edge_t {
+        int u, v;
+    } edge_t;
+    void cse_vs_enumerate(
+        int max_num_in,
+        int max_num_out,
+        int num_nodes,
+        node_t *nodes,
+        int num_edges,
+        edge_t *edges,
+        cse_output_cb output_cb)
+    {
+        DFG dfg("", num_nodes, 0);
+        for (int i = 0; i < num_nodes; i++) {
+            if (nodes[i].forbidden) {
+                dfg.set_forbidden(i);
+            }
+        }
+        for (int i = 0; i < num_edges; i++) {
+            dfg.add_edge(edges[i].u, edges[i].v);
+        }
+
+        int result[num_nodes];
+        vs_enumerate(dfg, max_num_in, max_num_out, [output_cb, &result] (const IOSubgraph &subgraph) {
+            int idx = 0;
+            for (const auto &u : subgraph.nodes()) {
+                result[idx] = u;
+                idx++;
+            }
+            output_cb(idx, result);
+        } );
+    }
+}

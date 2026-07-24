@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.11)
+cmake_minimum_required(VERSION 3.15)
 project(mvs)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_EXPORT_COMPILE_COMMANDS YES)
@@ -22,6 +22,14 @@ add_library(graph STATIC
   vs.cpp
 )
 target_compile_options(graph PRIVATE -Wall -Wextra -Wno-sign-compare -Wno-unused-function)
+add_library(cse SHARED
+  vs.cpp
+  io.cpp
+  graph.cpp
+  dfg.cpp
+  common.cpp
+)
+install(TARGETS cse DESTINATION nx_cse)
 add_executable(config_info config_info.cpp)
 target_link_libraries(config_info graph)
 add_executable(mis mis-main.cpp)
