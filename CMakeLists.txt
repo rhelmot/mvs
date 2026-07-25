@@ -2,15 +2,15 @@ cmake_minimum_required(VERSION 3.15)
 project(mvs)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_EXPORT_COMPILE_COMMANDS YES)
-include(FetchContent)
+# include(FetchContent)
 
-FetchContent_Declare(
-  json
-  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
-)
-FetchContent_MakeAvailable(json)
-link_libraries(nlohmann_json::nlohmann_json)
+# FetchContent_Declare(
+#   json
+#   URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+#   URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+# )
+# FetchContent_MakeAvailable(json)
+# link_libraries(nlohmann_json::nlohmann_json)
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_options(-O0)
@@ -31,8 +31,8 @@ add_library(cse SHARED
   io.cpp
   graph.cpp
   dfg.cpp
-  common.cpp
 )
+target_compile_options(cse PRIVATE -DNO_JSON)
 install(TARGETS cse DESTINATION nx_cse)
 add_executable(config_info config_info.cpp)
 target_link_libraries(config_info graph)
