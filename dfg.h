@@ -18,7 +18,6 @@ class DFG {
         vset<int> in_list;
         vset<int> out_list;
         double weight = 1;
-        bool forbidden = false;
         intset pred;
         intset succ;
     };
@@ -27,6 +26,7 @@ public:
     DFG(std::string name, int num_nodes, int frequency)
         : name_(std::move(name))
         , frequency_(frequency)
+        , forbidden_(num_nodes)
     {
         for (int i = 0; i < num_nodes; i++)
             nodes_.emplace_back(num_nodes);
@@ -37,16 +37,16 @@ public:
     void add_edge(int u, int v)
     {
         nodes_[u].out_list.add(v);
-        nodes_[u].succ.add(v);
         nodes_[v].in_list.add(u);
-        nodes_[v].pred.add(u);
     }
     void remove_edge(int u, int v)
     {
         nodes_[u].out_list.remove(v);
         nodes_[v].in_list.remove(u);
     }
-    void set_forbidden(int u) { nodes_[u].forbidden = true; }
+    void set_forbidden(int u) {
+        forbidden_.add(u);
+    }
     void index();
 
     const std::string &name() const { return name_; }
@@ -57,12 +57,13 @@ public:
     const vset<int> &out_edges(int u) const { return nodes_[u].out_list; }
     const intset &pred(int u) const { return nodes_[u].pred; }
     const intset &succ(int u) const { return nodes_[u].succ; }
-    bool is_forbidden(int u) const { return nodes_[u].forbidden; }
-    intset forbidden() const;
+    bool is_forbidden(int u) const { return forbidden_.contains(u); }
+    const intset &forbidden() const {return forbidden_; }
 
 private:
     std::string name_;
     int frequency_ = 0;
+    intset forbidden_;
 
     std::vector<Node> nodes_;
 };
@@ -101,13 +102,15 @@ public:
     Subgraph(const DFG &dfg)
         : dfg_(&dfg)
         , nodes_(dfg_->num_nodes())
-    {
-    }
+        {}
+    Subgraph(const DFG &&dfg)
+        : dfg_(&dfg)
+        , nodes_(dfg_->num_nodes())
+        {}
     Subgraph(const DFG &dfg, const intset &&nodes)
         : dfg_(&dfg)
         , nodes_(std::move(nodes))
-    {
-    }
+        {}
 
     void add(int u) { nodes_.add(u); }
     void remove(int u) { nodes_.remove(u); }
@@ -125,6 +128,10 @@ protected:
 
 class IOSubgraph : public Subgraph {
 public:
+    IOSubgraph(const IOSubgraph &dfg) = default;
+    IOSubgraph(IOSubgraph &&dfg) = default;
+    IOSubgraph& operator=(IOSubgraph &&dfg) = default;
+
     IOSubgraph(const DFG &dfg)
         : Subgraph(dfg)
     {
@@ -132,7 +139,7 @@ public:
                       "");
     }
 
-    IOSubgraph(const DFG &dfg, const intset &&nodes)
+    IOSubgraph(const DFG &dfg, intset &&nodes)
         : Subgraph(dfg, std::move(nodes))
     {
         init_io();

@@ -30,7 +30,7 @@ static bool verify_config(const DFG &dfg, const IOSubgraph &config)
     if (config.nodes().intersects(dfg.forbidden()))
         return false;
 
-    // assert config is already closed (itself convex?)
+    // assert config is convex
     return config.nodes() == config.closure();
 }
 
@@ -69,8 +69,12 @@ public:
 private:
     IOSubgraph config_;
     intset F_;
+
+    void fill_required();
+    void fill_forbidden();
 };
 
+// this computes valConv from the paper
 void VSFinder::visit(int max_num_in,
                      const std::function<void(const IOSubgraph &)> &output_cb)
 {
@@ -88,10 +92,19 @@ void VSFinder::visit(int max_num_in,
     // find the best-ish (better than optimal) pivot node
     // any predecessor which is not currently-excluded
     int id = -1;
-    auto pred = config_.pred();
-    for (const auto &u : pred) {
-        if (!F_.contains(u))
+    for (int u : config_.pred()) {
+        if (!F_.contains(u)) {
             id = u;
+            // NOTE we actually deviate from the paper and pick min(config_.pred() - F_) instead of max
+            // (by adding the break stmt)
+            // the goal of picking max(config_.pred() - F_) as per the paper is as a simplification for max(config_.anc() - F)
+            // which is in turn because this ensures the chosen nodes remain convex at every step
+            // however fill_required() and fill_forbidden() fix this differently, right...?
+            // the potential benefit of min() could be fewer recursive calls since we can eliminate swaths of nodes all at once with fill_required()
+            // though it's not clear that picking max() doesn't have the same effect for maximizing elimination via fill_forbidden()
+            // TODO make sure we didn't just backtrack to the paper this paper is improving on...
+            break;
+        }
     }
 
     if (id == -1) {
@@ -105,16 +118,52 @@ void VSFinder::visit(int max_num_in,
     }
 
     // recurse twice, once adding the pivot to the working set...
+    IOSubgraph config_prev(config_);
     config_.add(id);
+    fill_required();
     visit(max_num_in, output_cb);
+    config_ = std::move(config_prev);
 
     //  ...and once adding the pivot to the excluded set
-    config_.remove(id);
     intset F_prev(F_);
     F_.add(id);
-    F_.add(dfg.pred(id));  // also exclude preds of the pivot?
+    fill_forbidden();
     visit(max_num_in, output_cb);
-    F_ = F_prev;
+    F_ = std::move(F_prev);
+}
+
+// we chose to require the pivot
+// ensure all descendants of this pivot are also required
+// (since by this stage outputs are already fixed)
+void VSFinder::fill_required() {
+    for (int v = 0; v < config_.dfg().num_nodes(); v++) {
+        if (config_.nodes().contains(v) || F_.contains(v)) {
+            continue;
+        }
+        // if there exist an edge(u, v) where u is required, require v
+        for (int u : config_.dfg().in_edges(v)) {
+            if (config_.nodes().contains(u)) {
+                config_.add(v);
+            }
+        }
+    }
+}
+
+// we chose to forbid the pivot
+// ensure we can never try to go down any path which can lead to the pivot
+// (since by this stage outputs are already fixed)
+void VSFinder::fill_forbidden() {
+    for (int u = config_.dfg().num_nodes() - 1; u >= 0; u--) {
+        if (config_.nodes().contains(u) || F_.contains(u)) {
+            continue;
+        }
+        // if there exists an edge (u, v) where v is forbidden, forbid u
+        for (int v : config_.dfg().out_edges(u)) {
+            if (F_.contains(v)) {
+                F_.add(u);
+            }
+        }
+    }
 }
 
 namespace {
@@ -210,6 +259,7 @@ extern "C" {
         for (int i = 0; i < num_edges; i++) {
             dfg.add_edge(edges[i].u, edges[i].v);
         }
+        dfg.index();
 
         int result[num_nodes];
         vs_enumerate(dfg, max_num_in, max_num_out, [output_cb, &result] (const IOSubgraph &subgraph) {

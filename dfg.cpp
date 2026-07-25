@@ -31,17 +31,21 @@
 #include <utility>
 
 DFG::DFG(std::initializer_list<std::pair<int, int>> list)
+: forbidden_(0)
 {
-    int num_nodes = 0;
-    for (auto &edge : list)
+    int num_nodes = -1;
+    for (const auto &edge : list)
         num_nodes = std::max({
             num_nodes,
-            edge.first + 1,
-            edge.second + 1,
+            edge.first,
+            edge.second,
         });
+    num_nodes++;
+    forbidden_ = intset(num_nodes);
+
     for (int i = 0; i < num_nodes; i++)
         nodes_.emplace_back(num_nodes);
-    for (auto &edge : list)
+    for (const auto &edge : list)
         add_edge(edge.first, edge.second);
 }
 
@@ -126,16 +130,6 @@ void DFG::index()
             nodes_[u].succ.add(v);
         }
     }
-}
-
-intset DFG::forbidden() const
-{
-    intset s(num_nodes());
-    for (int i = 0; i < num_nodes(); i++) {
-        if (is_forbidden(i) || in_edges(i).empty() || out_edges(i).empty())
-            s.add(i);
-    }
-    return s;
 }
 
 void DFSVisitor::i_visit(const DFG &dfg,
