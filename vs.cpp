@@ -46,11 +46,13 @@ static intset config_exclusion(const DFG &dfg, const intset &config)
         // only care about edges with b in out (L)
         // this works because a) reverse toposort b) we require all nodes with
         // no predecessors are forbidden
-        if (out.contains(b))  
-            for (auto &a : dfg.in_edges(b)) {
-                if (a < dfg.num_nodes() && !config.contains(a))
+        if (out.contains(b)) {
+            for (int a : dfg.in_edges(b)) {
+                if (a < dfg.num_nodes() && !config.contains(a)) {
                     out.add(a);  // if (a not in config (Q)) { L <- L OR {a} }
+                }
             }
+        }
 
     return out;
 }
@@ -61,9 +63,11 @@ public:
         : config_(dfg, outputs.closure())
         , F_(config_exclusion(dfg, outputs.nodes()))
     {
+        fill_forbidden();
+        fill_required();
     }
 
-    void visit(int max_num_in,
+    void visit(int max_weight_in,
                const std::function<void(const IOSubgraph &)> &output_cb);
 
 private:
@@ -75,18 +79,20 @@ private:
 };
 
 // this computes valConv from the paper
-void VSFinder::visit(int max_num_in,
+void VSFinder::visit(int max_weight_in,
                      const std::function<void(const IOSubgraph &)> &output_cb)
 {
     const DFG &dfg = config_.dfg();
-    int num_perm_in = 0;
-    for (auto &u : config_.inputs()) {
-        if (u >= dfg.num_nodes() || F_.contains(u))
-            num_perm_in++;
+    int weight_in = 0;
+    for (int u : config_.inputs()) {
+        assert(u < dfg.num_nodes());
+        if (F_.contains(u)) {
+            weight_in += dfg.weight(u) ;
+        }
     }
 
     // this branch has too many inputs, don't bother looking further
-    if (num_perm_in > max_num_in)
+    if (weight_in > max_weight_in)
         return;
 
     // find the best-ish (better than optimal) pivot node
@@ -121,14 +127,14 @@ void VSFinder::visit(int max_num_in,
     IOSubgraph config_prev(config_);
     config_.add(id);
     fill_required();
-    visit(max_num_in, output_cb);
+    visit(max_weight_in, output_cb);
     config_ = std::move(config_prev);
 
     //  ...and once adding the pivot to the excluded set
     intset F_prev(F_);
     F_.add(id);
     fill_forbidden();
-    visit(max_num_in, output_cb);
+    visit(max_weight_in, output_cb);
     F_ = std::move(F_prev);
 }
 
@@ -172,50 +178,55 @@ namespace {
 // and then for each valid output set calls VSFinder::visit
 void vs_enumerate_(const DFG &dfg,
                    Subgraph &outputs,
-                   int size,
-                   int max_num_in,
-                   int max_num_out,
+                   int weight,
+                   int max_weight_in,
+                   int max_weight_out,
                    const std::function<void(const IOSubgraph &)> &output_cb)
 {
-    if (size >= 1) {
+    if (weight > 0) {
         // find convex subgraphs with this output set
         VSFinder finder(dfg, outputs);
-        finder.visit(max_num_in, output_cb);
+        finder.visit(max_weight_in, output_cb);
     }
 
     // don't bother trying to recurse (add output nodes) if we have too many
-    if (size < max_num_out) {  
-        auto exclusion = config_exclusion(dfg, outputs.nodes());
-        auto pred = outputs.pred();
+    if (weight >= max_weight_out) {
+        return;
+    }
 
-        // valid nodes: currently-excluded nodes which are not globally
-        // forbidden and which are not both a predecessor of the current output
-        // set and having a successor which is both a predecessor of the
-        // current output set and currently-excluded
-        intset valid(dfg.num_nodes());
-        for (const auto &u : exclusion) {
-            if (!dfg.is_forbidden(u) &&
-                !(pred.contains(u) && dfg.succ(u).intersects(pred, exclusion)))
-                valid.add(u);
+    auto exclusion = config_exclusion(dfg, outputs.nodes());
+    auto pred = outputs.pred();
+
+    // we only need to enumerate up to the smallest (toposorted)
+    // preexisting output
+    unsigned bound = outputs.nodes().minimum();
+    if (bound == -1) {
+        bound = dfg.num_nodes();
+    }
+
+    // valid nodes: currently-excluded nodes which are not globally
+    // forbidden and which are not both a predecessor of the current output
+    // set and having a successor which is both a predecessor of the
+    // current output set and currently-excluded
+
+    // since intset enumerates in sorted order we can combine these loops
+    for (int u : exclusion) {
+        if (u >= bound) {
+            break;
         }
-
-        // we only need to enumerate up to the smallest (toposorted)
-        // preexisting output
-        unsigned min = outputs.nodes().minimum();
-        for (int u = 0; u < dfg.num_nodes(); u++) {
-            if (min != -1 && u >= min)
-                break;
-            if (valid.contains(u)) {
-                // recurse with the single added output node
-                outputs.add(u);
-                vs_enumerate_(dfg,
-                              outputs,
-                              size + 1,
-                              max_num_in,
-                              max_num_out,
-                              output_cb);
-                outputs.remove(u);
-            }
+        if (!dfg.is_forbidden(u)
+            && !(pred.contains(u) && dfg.succ(u).intersects(pred, exclusion))
+            && weight + dfg.weight(u) <= max_weight_out)
+        {
+            // recurse with the single added output node
+            outputs.add(u);
+            vs_enumerate_(dfg,
+                          outputs,
+                          weight + dfg.weight(u),
+                          max_weight_in,
+                          max_weight_out,
+                          output_cb);
+            outputs.remove(u);
         }
     }
 }
@@ -224,17 +235,16 @@ void vs_enumerate_(const DFG &dfg,
 
 // main entry point
 void vs_enumerate(DFG &dfg,
-                  int max_num_in,
-                  int max_num_out,
+                  int max_weight_in,
+                  int max_weight_out,
                   const std::function<void(const IOSubgraph &)> &output_cb)
 {
     // begin with an empty output set
     Subgraph outputs(dfg);
-    vs_enumerate_(dfg, outputs, 0, max_num_in, max_num_out, output_cb);
+    vs_enumerate_(dfg, outputs, 0, max_weight_in, max_weight_out, output_cb);
 
     // handle void outputs
-    // for each allowed node with no successors, try explicitly adding it to the output set
-    // and then trying to enumerate with max_num_out=1
+    // for each allowed node with no successors, try explicitly using it as the only output
     // to prevent duplicates, we can add each output to the forbidden set after it is exhausted
     // NOTE it's not clear whether order matters here. I don't think so...?
     std::vector<int> stash;
@@ -245,7 +255,7 @@ void vs_enumerate(DFG &dfg,
 
         outputs.add(v);
         VSFinder finder(dfg, outputs);
-        finder.visit(max_num_in, output_cb);
+        finder.visit(max_weight_in, output_cb);
         outputs.remove(v);
 
         stash.push_back(v);
@@ -261,13 +271,14 @@ extern "C" {
     typedef void (*cse_output_cb)(int num_nodes, int *nodes);
     typedef struct node_t {
         bool forbidden;
+        int weight;
     } node_t;
     typedef struct edge_t {
         int u, v;
     } edge_t;
     void cse_vs_enumerate(
-        int max_num_in,
-        int max_num_out,
+        int max_weight_in,
+        int max_weight_out,
         int num_nodes,
         node_t *nodes,
         int num_edges,
@@ -279,6 +290,7 @@ extern "C" {
             if (nodes[i].forbidden) {
                 dfg.set_forbidden(i);
             }
+            dfg.weight(i) = nodes[i].weight;
         }
         for (int i = 0; i < num_edges; i++) {
             dfg.add_edge(edges[i].u, edges[i].v);
@@ -286,7 +298,7 @@ extern "C" {
         dfg.index();
 
         int result[num_nodes];
-        vs_enumerate(dfg, max_num_in, max_num_out, [output_cb, &result] (const IOSubgraph &subgraph) {
+        vs_enumerate(dfg, max_weight_in, max_weight_out, [output_cb, &result] (const IOSubgraph &subgraph) {
             int idx = 0;
             for (const auto &u : subgraph.nodes()) {
                 result[idx] = u;

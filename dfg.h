@@ -17,7 +17,7 @@ class DFG {
 
         vset<int> in_list;
         vset<int> out_list;
-        double weight = 1;
+        int weight = 1;
         intset pred;
         intset succ;
     };
@@ -54,8 +54,8 @@ public:
 
     const std::string &name() const { return name_; }
     int num_nodes() const { return nodes_.size(); }
-    double weight(int u) const { return nodes_[u].weight; }
-    double &weight(int u) { return nodes_[u].weight; }
+    int weight(int u) const { return nodes_[u].weight; }
+    int &weight(int u) { return nodes_[u].weight; }
     const vset<int> &in_edges(int u) const { return nodes_[u].in_list; }
     const vset<int> &out_edges(int u) const { return nodes_[u].out_list; }
     const intset &pred(int u) const { return nodes_[u].pred; }
@@ -153,7 +153,7 @@ public:
     const vset<int> &outputs() const { return outputs_; }
     int num_in() const { return inputs_.size(); }
     int num_out() const { return outputs_.size(); }
-    double weight() const { return weight_; }
+    int weight() const { return weight_; }
 
     void set(const intset &nodes)
     {
@@ -181,5 +181,5 @@ private:
 
     vset<int> inputs_;
     vset<int> outputs_;
-    double weight_ = 0;
+    int weight_ = 0;
 };
