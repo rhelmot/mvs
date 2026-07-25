@@ -223,7 +223,7 @@ void vs_enumerate_(const DFG &dfg,
 }
 
 // main entry point
-void vs_enumerate(const DFG &dfg,
+void vs_enumerate(DFG &dfg,
                   int max_num_in,
                   int max_num_out,
                   const std::function<void(const IOSubgraph &)> &output_cb)
@@ -231,6 +231,30 @@ void vs_enumerate(const DFG &dfg,
     // begin with an empty output set
     Subgraph outputs(dfg);
     vs_enumerate_(dfg, outputs, 0, max_num_in, max_num_out, output_cb);
+
+    // handle void outputs
+    // for each allowed node with no successors, try explicitly adding it to the output set
+    // and then trying to enumerate with max_num_out=1
+    // to prevent duplicates, we can add each output to the forbidden set after it is exhausted
+    // NOTE it's not clear whether order matters here. I don't think so...?
+    std::vector<int> stash;
+    for (int v = 0; v < dfg.num_nodes(); v++) {
+        if (!dfg.out_edges(v).empty() || dfg.is_forbidden(v)) {
+            continue;
+        }
+
+        outputs.add(v);
+        VSFinder finder(dfg, outputs);
+        finder.visit(max_num_in, output_cb);
+        outputs.remove(v);
+
+        stash.push_back(v);
+        dfg.set_forbidden(v);
+    }
+
+    for (int v : std::move(stash)) {
+        dfg.unset_forbidden(v);
+    }
 }
 
 extern "C" {

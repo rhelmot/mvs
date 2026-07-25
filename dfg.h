@@ -47,6 +47,9 @@ public:
     void set_forbidden(int u) {
         forbidden_.add(u);
     }
+    void unset_forbidden(int u) {
+        forbidden_.remove(u);
+    }
     void index();
 
     const std::string &name() const { return name_; }
