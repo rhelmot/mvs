@@ -67,8 +67,8 @@ public:
         fill_required();
     }
 
-    void visit(int max_weight_in,
-               const std::function<void(const IOSubgraph &)> &output_cb);
+    bool visit(int max_weight_in,
+               const std::function<bool(const IOSubgraph &)> &output_cb);
 
 private:
     IOSubgraph config_;
@@ -79,8 +79,8 @@ private:
 };
 
 // this computes valConv from the paper
-void VSFinder::visit(int max_weight_in,
-                     const std::function<void(const IOSubgraph &)> &output_cb)
+bool VSFinder::visit(int max_weight_in,
+                     const std::function<bool(const IOSubgraph &)> &output_cb)
 {
     const DFG &dfg = config_.dfg();
     int weight_in = 0;
@@ -93,7 +93,7 @@ void VSFinder::visit(int max_weight_in,
 
     // this branch has too many inputs, don't bother looking further
     if (weight_in > max_weight_in)
-        return;
+        return true;
 
     // find the best-ish (better than optimal) pivot node
     // any predecessor which is not currently-excluded
@@ -115,17 +115,27 @@ void VSFinder::visit(int max_weight_in,
 
     if (id == -1) {
         // no pivot found, this is a leaf! send it!
-        output_cb(config_);
+        if (!output_cb(config_)) {
+            return false;
+        }
 
         if (VERIFY)
             assert(verify_config(dfg, config_));
 
-        return;
+        return true;
     }
 
     // recurse twice, once adding the pivot to the working set...
     IOSubgraph config_prev(config_);
-    config_.add(id);
+    int cluster = config_.dfg().cluster(id);
+    if (cluster == -1) {
+        config_.add(id);
+    } else {
+        do {
+            config_.add(cluster);
+            cluster++;
+        } while (config_.dfg().is_cluster_trail(cluster));
+    }
     fill_required();
     visit(max_weight_in, output_cb);
     config_ = std::move(config_prev);
@@ -133,9 +143,19 @@ void VSFinder::visit(int max_weight_in,
     //  ...and once adding the pivot to the excluded set
     intset F_prev(F_);
     F_.add(id);
+    cluster = config_.dfg().cluster(id);
+    if (cluster == -1) {
+        F_.add(id);
+    } else {
+        do {
+            F_.add(cluster);
+            cluster++;
+        } while (config_.dfg().is_cluster_trail(cluster));
+    }
     fill_forbidden();
     visit(max_weight_in, output_cb);
     F_ = std::move(F_prev);
+    return true;
 }
 
 // we chose to require the pivot
@@ -149,7 +169,19 @@ void VSFinder::fill_required() {
         // if there exist an edge(u, v) where u is required, require v
         for (int u : config_.dfg().in_edges(v)) {
             if (config_.nodes().contains(u)) {
-                config_.add(v);
+                int cluster = config_.dfg().cluster(v);
+                if (cluster != -1) {
+                    // add all cluster siblings as unit
+                    do {
+                        config_.add(cluster);
+                        cluster++;
+                    } while (config_.dfg().is_cluster_trail(cluster));
+                    // skip to the end of the cluster
+                    v = cluster - 1;
+                } else {
+                    config_.add(v);
+                }
+                break;
             }
         }
     }
@@ -166,7 +198,20 @@ void VSFinder::fill_forbidden() {
         // if there exists an edge (u, v) where v is forbidden, forbid u
         for (int v : config_.dfg().out_edges(u)) {
             if (F_.contains(v)) {
-                F_.add(u);
+                int cluster = config_.dfg().cluster(u);
+                if (cluster != -1) {
+                    // forbid all cluster siblings as unit
+                    F_.add(cluster);
+                    while (config_.dfg().is_cluster_trail(cluster)) {
+                        cluster--;
+                        F_.add(cluster);
+                    }
+                    // skip to the end of the cluster
+                    u = cluster;
+                } else {
+                    F_.add(u);
+                }
+                break;
             }
         }
     }
@@ -176,22 +221,24 @@ namespace {
 
 // this computes valOutputs from the paper
 // and then for each valid output set calls VSFinder::visit
-void vs_enumerate_(const DFG &dfg,
+bool vs_enumerate_(const DFG &dfg,
                    Subgraph &outputs,
                    int weight,
                    int max_weight_in,
                    int max_weight_out,
-                   const std::function<void(const IOSubgraph &)> &output_cb)
+                   const std::function<bool(const IOSubgraph &)> &output_cb)
 {
     if (weight > 0) {
         // find convex subgraphs with this output set
         VSFinder finder(dfg, outputs);
-        finder.visit(max_weight_in, output_cb);
+        if (!finder.visit(max_weight_in, output_cb)) {
+            return false;
+        }
     }
 
     // don't bother trying to recurse (add output nodes) if we have too many
     if (weight >= max_weight_out) {
-        return;
+        return true;
     }
 
     auto exclusion = config_exclusion(dfg, outputs.nodes());
@@ -209,55 +256,86 @@ void vs_enumerate_(const DFG &dfg,
     // set and having a successor which is both a predecessor of the
     // current output set and currently-excluded
 
-    // since intset enumerates in sorted order we can combine these loops
-    for (int u : exclusion) {
-        if (u >= bound) {
-            break;
+    for (int u = 0; u < bound; u++) {
+        if (!exclusion.contains(u)) {
+            continue;
         }
-        if (!dfg.is_forbidden(u)
-            && !(pred.contains(u) && dfg.succ(u).intersects(pred, exclusion))
-            && weight + dfg.weight(u) <= max_weight_out)
-        {
-            // recurse with the single added output node
+        if (dfg.is_forbidden(u) || (pred.contains(u) && dfg.succ(u).intersects(pred, exclusion))) {
+            continue;
+        }
+        int cluster = dfg.cluster(u);
+        if (cluster == -1) {
+            weight += dfg.weight(u);
             outputs.add(u);
-            vs_enumerate_(dfg,
+        } else {
+            // add clusters as units
+            do {
+                weight += dfg.weight(cluster);
+                outputs.add(cluster);
+                cluster++;
+            } while (dfg.is_cluster_trail(cluster));
+            // skip the rest of the cluster since we already handled it
+            u = cluster - 1;
+        }
+
+        if (weight <= max_weight_out) {
+            // recurse with the output node(s) added
+            if (!vs_enumerate_(dfg,
                           outputs,
-                          weight + dfg.weight(u),
+                          weight,
                           max_weight_in,
                           max_weight_out,
-                          output_cb);
+                          output_cb)) {
+                return false;
+            }
+        }
+
+        if (cluster == -1) {
+            weight -= dfg.weight(u);
             outputs.remove(u);
+        } else {
+            do {
+                cluster--;
+                weight -= dfg.weight(cluster);
+                outputs.remove(cluster);
+            } while (dfg.is_cluster_trail(cluster));
         }
     }
+    return true;
 }
 
 }
 
 // main entry point
-void vs_enumerate(DFG &dfg,
+bool vs_enumerate(DFG &dfg,
                   int max_weight_in,
                   int max_weight_out,
-                  const std::function<void(const IOSubgraph &)> &output_cb)
+                  const std::function<bool(const IOSubgraph &)> &output_cb)
 {
     // begin with an empty output set
     Subgraph outputs(dfg);
-    vs_enumerate_(dfg, outputs, 0, max_weight_in, max_weight_out, output_cb);
+    if (!vs_enumerate_(dfg, outputs, 0, max_weight_in, max_weight_out, output_cb)) {
+        return false;
+    }
 
     // handle void outputs
     // for each allowed node with no successors, try explicitly using it as the only output
     // to prevent duplicates, we can add each output to the forbidden set after it is exhausted
     // NOTE it's not clear whether order matters here. I don't think so...?
+    // NOTE by downstream definition there's no such thing as a void cluster
     std::vector<int> stash;
     for (int v = 0; v < dfg.num_nodes(); v++) {
         if (!dfg.out_edges(v).empty() || dfg.is_forbidden(v)) {
             continue;
         }
-
         outputs.add(v);
-        VSFinder finder(dfg, outputs);
-        finder.visit(max_weight_in, output_cb);
-        outputs.remove(v);
 
+        VSFinder finder(dfg, outputs);
+        if (!finder.visit(max_weight_in, output_cb)) {
+            return false;
+        }
+
+        outputs.remove(v);
         stash.push_back(v);
         dfg.set_forbidden(v);
     }
@@ -265,18 +343,20 @@ void vs_enumerate(DFG &dfg,
     for (int v : std::move(stash)) {
         dfg.unset_forbidden(v);
     }
+    return true;
 }
 
 extern "C" {
-    typedef void (*cse_output_cb)(int num_nodes, int *nodes);
+    typedef bool (*cse_output_cb)(int num_nodes, int *nodes);
     typedef struct node_t {
         bool forbidden;
+        bool cluster_trail;
         int weight;
     } node_t;
     typedef struct edge_t {
         int u, v;
     } edge_t;
-    void cse_vs_enumerate(
+    int cse_vs_enumerate(
         int max_weight_in,
         int max_weight_out,
         int num_nodes,
@@ -286,11 +366,18 @@ extern "C" {
         cse_output_cb output_cb)
     {
         DFG dfg("", num_nodes, 0);
+        bool in_cluster = false;
         for (int i = 0; i < num_nodes; i++) {
             if (nodes[i].forbidden) {
                 dfg.set_forbidden(i);
             }
+            if (nodes[i].cluster_trail) {
+                dfg.set_cluster_trail(i);
+            }
             dfg.weight(i) = nodes[i].weight;
+        }
+        if (in_cluster) {
+            return -1;
         }
         for (int i = 0; i < num_edges; i++) {
             dfg.add_edge(edges[i].u, edges[i].v);
@@ -298,13 +385,16 @@ extern "C" {
         dfg.index();
 
         int result[num_nodes];
-        vs_enumerate(dfg, max_weight_in, max_weight_out, [output_cb, &result] (const IOSubgraph &subgraph) {
+        if (!vs_enumerate(dfg, max_weight_in, max_weight_out, [output_cb, &result] (const IOSubgraph &subgraph) {
             int idx = 0;
             for (const auto &u : subgraph.nodes()) {
                 result[idx] = u;
                 idx++;
             }
-            output_cb(idx, result);
-        } );
+            return output_cb(idx, result);
+        } )) {
+            return -2;
+        }
+        return 0;
     }
 }

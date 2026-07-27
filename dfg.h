@@ -27,6 +27,7 @@ public:
         : name_(std::move(name))
         , frequency_(frequency)
         , forbidden_(num_nodes)
+        , clusters_(num_nodes)
     {
         for (int i = 0; i < num_nodes; i++)
             nodes_.emplace_back(num_nodes);
@@ -50,6 +51,35 @@ public:
     void unset_forbidden(int u) {
         forbidden_.remove(u);
     }
+    // clusters must be contiguous ranges [a,b] where [a+1,b] is marked here
+    void set_cluster_trail(int u) {
+        clusters_.add(u);
+    }
+    bool is_cluster_trail(int u) const {
+        return clusters_.contains(u);
+    }
+    int cluster(int u) const {
+        if (clusters_.contains(u)) {
+            do {
+                u--;
+            } while (clusters_.contains(u));
+            return u;
+        } else if (u + 1 < num_nodes() && clusters_.contains(u + 1)) {
+            return u;
+        } else {
+            return -1;
+        }
+    }
+    int cluster_end(int u) const {
+        if (clusters_.contains(u) || (u + 1 < num_nodes() && clusters_.contains(u + 1))) {
+            while (u + 1 < num_nodes() && clusters_.contains(u + 1)) {
+                u++;
+            }
+            return u;
+        } else {
+            return -1;
+        }
+    }
     void index();
 
     const std::string &name() const { return name_; }
@@ -67,6 +97,7 @@ private:
     std::string name_;
     int frequency_ = 0;
     intset forbidden_;
+    intset clusters_;
 
     std::vector<Node> nodes_;
 };

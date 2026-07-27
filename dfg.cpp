@@ -32,6 +32,7 @@
 
 DFG::DFG(std::initializer_list<std::pair<int, int>> list)
 : forbidden_(0)
+, clusters_(0)
 {
     int num_nodes = -1;
     for (const auto &edge : list)
@@ -42,6 +43,7 @@ DFG::DFG(std::initializer_list<std::pair<int, int>> list)
         });
     num_nodes++;
     forbidden_ = intset(num_nodes);
+    clusters_ = intset(num_nodes);
 
     for (int i = 0; i < num_nodes; i++)
         nodes_.emplace_back(num_nodes);
@@ -49,6 +51,7 @@ DFG::DFG(std::initializer_list<std::pair<int, int>> list)
         add_edge(edge.first, edge.second);
 }
 
+#ifndef NO_JSON
 std::unique_ptr<DFG> DFG::make_dfg(std::istream &in, bool set_weights)
 {
     std::string line;
@@ -98,6 +101,7 @@ std::unique_ptr<DFG> DFG::make_dfg(std::istream &in, bool set_weights)
     dfg->index();
     return dfg;
 }
+#endif
 
 void DFG::index()
 {

@@ -16,11 +16,14 @@
 #include "cluster.h"
 #include "dfg.h"
 #include "intset.h"
-#include "nlohmann/json.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <string>
 #include <vector>
+
+#ifndef NO_JSON
+#include "nlohmann/json.hpp"
+#endif
 
 bool parse_integer(const std::string &str, int &v, int a, int b)
 {
@@ -60,6 +63,7 @@ bool fp_eq(double x, double y, double eps)
     return diff >= -eps && diff <= eps;
 }
 
+#ifndef NO_JSON
 void to_json(nlohmann::json &j, const SCluster &cluster)
 {
     j = {
@@ -86,3 +90,4 @@ void to_json(nlohmann::json &j, const intset &s)
         j += i;
     }
 }
+#endif

@@ -27,6 +27,7 @@ add_library(graph STATIC
 )
 target_compile_options(graph PRIVATE -Wall -Wextra -Wno-sign-compare -Wno-unused-function)
 add_library(cse SHARED
+  common.cpp
   vs.cpp
   io.cpp
   graph.cpp
