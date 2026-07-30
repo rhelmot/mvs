@@ -37,23 +37,29 @@ static bool verify_config(const DFG &dfg, const IOSubgraph &config)
 // this is the exclude_F function from the paper
 // find all nodes for which there is a path from it to a forbidden node
 // that does not go through the selected subgraph
-static intset config_exclusion(const DFG &dfg, const intset &config)
+static intset config_exclusion(const intset &forbidden, const DFG &dfg, const intset &config)
 {
-    intset out(dfg.forbidden()); // L <- F
+    // usually out is defined as dfg.forbidden(). however, we parameterize it here
+    // because actually we want slightly different definitions between phases.
+    // output phase wants to use dead-end nodes as part of the starting set
+    // (so their ancestors get treated as potential outputs)
+    // divide-and-conquer phase wants to use true forbidden nodes
+    // (so we may sneak into an appendix during growth)
+    intset out(forbidden);
 
     // enumerate all edges in reverse topological order
-    for (int b = dfg.num_nodes() - 1; b >= 0; b--)
+    for (int b = dfg.num_nodes() - 1; b >= 0; b--) {
         // only care about edges with b in out (L)
         // this works because a) reverse toposort b) we require all nodes with
         // no predecessors are forbidden
         if (out.contains(b)) {
             for (int a : dfg.in_edges(b)) {
-                if (a < dfg.num_nodes() && !config.contains(a)) {
+                if (!config.contains(a)) {
                     out.add(a);  // if (a not in config (Q)) { L <- L OR {a} }
                 }
             }
         }
-
+    }
     return out;
 }
 
@@ -61,7 +67,8 @@ class VSFinder {
 public:
     VSFinder(const DFG &dfg, const Subgraph &outputs)
         : config_(dfg, outputs.closure())
-        , F_(config_exclusion(dfg, outputs.nodes()))
+        , original_outputs_(outputs.nodes())
+        , F_(config_exclusion(dfg.forbidden(), dfg, outputs.nodes()))
     {
         fill_forbidden();
         fill_required();
@@ -72,6 +79,7 @@ public:
 
 private:
     IOSubgraph config_;
+    intset original_outputs_;
     intset F_;
 
     void fill_required();
@@ -168,7 +176,7 @@ void VSFinder::fill_required() {
         }
         // if there exist an edge(u, v) where u is required, require v
         for (int u : config_.dfg().in_edges(v)) {
-            if (config_.nodes().contains(u)) {
+            if (config_.nodes().contains(u) && !original_outputs_.contains(u)) {
                 int cluster = config_.dfg().cluster(v);
                 if (cluster != -1) {
                     // add all cluster siblings as unit
@@ -222,6 +230,7 @@ namespace {
 // this computes valOutputs from the paper
 // and then for each valid output set calls VSFinder::visit
 bool vs_enumerate_(const DFG &dfg,
+                   const intset &seeds,
                    Subgraph &outputs,
                    int weight,
                    int max_weight_in,
@@ -241,7 +250,7 @@ bool vs_enumerate_(const DFG &dfg,
         return true;
     }
 
-    auto exclusion = config_exclusion(dfg, outputs.nodes());
+    auto exclusion = config_exclusion(seeds, dfg, outputs.nodes());
     auto pred = outputs.pred();
 
     // we only need to enumerate up to the smallest (toposorted)
@@ -260,7 +269,11 @@ bool vs_enumerate_(const DFG &dfg,
         if (!exclusion.contains(u)) {
             continue;
         }
-        if (dfg.is_forbidden(u) || (pred.contains(u) && dfg.succ(u).intersects(pred, exclusion))) {
+        if (seeds.contains(u)) {
+            continue;
+        }
+        // I don't understand this condition
+        if (pred.contains(u) && dfg.succ(u).intersects(pred, exclusion)) {
             continue;
         }
         int cluster = dfg.cluster(u);
@@ -281,6 +294,7 @@ bool vs_enumerate_(const DFG &dfg,
         if (weight <= max_weight_out) {
             // recurse with the output node(s) added
             if (!vs_enumerate_(dfg,
+                          seeds,
                           outputs,
                           weight,
                           max_weight_in,
@@ -314,7 +328,13 @@ bool vs_enumerate(DFG &dfg,
 {
     // begin with an empty output set
     Subgraph outputs(dfg);
-    if (!vs_enumerate_(dfg, outputs, 0, max_weight_in, max_weight_out, output_cb)) {
+    intset seeds(dfg.forbidden());
+    for (int u = 0; u < dfg.num_nodes(); u++) {
+        if (dfg.out_edges(u).size() == 0) {
+            seeds.add(u);
+        }
+    }
+    if (!vs_enumerate_(dfg, seeds, outputs, 0, max_weight_in, max_weight_out, output_cb)) {
         return false;
     }
 
