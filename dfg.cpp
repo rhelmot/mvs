@@ -33,6 +33,7 @@
 DFG::DFG(std::initializer_list<std::pair<int, int>> list)
 : forbidden_(0)
 , clusters_(0)
+, forbiddable_(0)
 {
     int num_nodes = -1;
     for (const auto &edge : list)
@@ -44,6 +45,7 @@ DFG::DFG(std::initializer_list<std::pair<int, int>> list)
     num_nodes++;
     forbidden_ = intset(num_nodes);
     clusters_ = intset(num_nodes);
+    forbiddable_ = intset(num_nodes);
 
     for (int i = 0; i < num_nodes; i++)
         nodes_.emplace_back(num_nodes);
@@ -134,6 +136,11 @@ void DFG::index()
             nodes_[u].succ.add(v);
         }
     }
+
+    for (int u : forbidden_) {
+        forbiddable_.add(u);
+        forbiddable_.add(nodes_[u].pred);
+    }
 }
 
 void DFSVisitor::i_visit(const DFG &dfg,
@@ -165,8 +172,7 @@ void DFSVisitor::i_visit(const DFG &dfg,
     }
 }
 
-// all nodes which are immediate predecessors of the subgraph while not already
-// being in the subgraph
+// all nodes which are ancestors of the subgraph
 intset Subgraph::pred() const
 {
     intset out(dfg_->num_nodes());
@@ -176,8 +182,7 @@ intset Subgraph::pred() const
     return out.remove(nodes_);
 }
 
-// all nodes which are immediate successors of the subgraph while not already
-// being in the subgraph
+// all nodes which are descendants of the subgraph
 intset Subgraph::succ() const
 {
     intset out(dfg_->num_nodes());
@@ -187,7 +192,6 @@ intset Subgraph::succ() const
     return out.remove(nodes_);
 }
 
-// it's not clear why this is a correct implementation of convex-closure...
 intset Subgraph::closure() const
 {
     return nodes_ | (pred() & succ());

@@ -80,4 +80,14 @@ struct vmap : std::vector<std::pair<T, U>> {
             this->pop_back();
         }
     }
+
+    template <class... Args>
+    U &find_or_emplace(T v, Args&&... args) {
+        auto it = this->find(v);
+        if (it == this->end()) {
+            return this->insert(it, {v, U(args...)})->second;
+        } else {
+           return it->second;
+        }
+    }
 };

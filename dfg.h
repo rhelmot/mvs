@@ -28,6 +28,7 @@ public:
         , frequency_(frequency)
         , forbidden_(num_nodes)
         , clusters_(num_nodes)
+        , forbiddable_(num_nodes)
     {
         for (int i = 0; i < num_nodes; i++)
             nodes_.emplace_back(num_nodes);
@@ -91,13 +92,16 @@ public:
     const intset &pred(int u) const { return nodes_[u].pred; }
     const intset &succ(int u) const { return nodes_[u].succ; }
     bool is_forbidden(int u) const { return forbidden_.contains(u); }
-    const intset &forbidden() const {return forbidden_; }
+    const intset &forbidden() const { return forbidden_; }
+    bool is_forbiddable(int u) const { return forbiddable_.contains(u); }
+    const intset &forbiddable() const { return forbiddable_; }
 
 private:
     std::string name_;
     int frequency_ = 0;
     intset forbidden_;
     intset clusters_;
+    intset forbiddable_;
 
     std::vector<Node> nodes_;
 };

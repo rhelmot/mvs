@@ -17,6 +17,7 @@
 #include "dfg.h"
 #include <cassert>
 #include <functional>
+#include <map>
 
 static const bool VERIFY = false;
 
@@ -48,17 +49,32 @@ static intset config_exclusion(const intset &forbidden, const DFG &dfg, const in
     intset out(forbidden);
 
     // enumerate all edges in reverse topological order
-    for (int b = dfg.num_nodes() - 1; b >= 0; b--) {
+    for (int v = dfg.num_nodes() - 1; v >= 0; v--) {
         // only care about edges with b in out (L)
         // this works because a) reverse toposort b) we require all nodes with
         // no predecessors are forbidden
-        if (out.contains(b)) {
-            for (int a : dfg.in_edges(b)) {
-                if (!config.contains(a)) {
-                    out.add(a);  // if (a not in config (Q)) { L <- L OR {a} }
+        if (out.contains(v)) {
+            for (int u : dfg.in_edges(v)) {
+                if (!config.contains(u)) {
+                    out.add(u);  // if (a not in config (Q)) { L <- L OR {a} }
                 }
             }
         }
+    }
+    // fix up clusters
+    for (int u = 0; u < dfg.num_nodes(); u++) {
+        if (!out.contains(u)) {
+            continue;
+        }
+        int cluster = dfg.cluster(u);
+        if (cluster == -1) {
+            continue;
+        }
+        do {
+            out.add(cluster);
+            cluster++;
+        } while (dfg.is_cluster_trail(cluster));
+        u = cluster - 1;
     }
     return out;
 }
@@ -75,12 +91,18 @@ public:
     }
 
     bool visit(int max_weight_in,
-               const std::function<bool(const IOSubgraph &)> &output_cb);
+               const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb);
+    bool visit_outputs(int max_weight_in,
+               const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb);
 
 private:
+    bool visit_outputs_(int max_weight_in,
+               const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb, int idx);
     IOSubgraph config_;
     intset original_outputs_;
     intset F_;
+    std::vector<intset> appendices_eager_;
+    std::vector<std::vector<int>> appendices_lazy_;
 
     void fill_required();
     void fill_forbidden();
@@ -88,7 +110,7 @@ private:
 
 // this computes valConv from the paper
 bool VSFinder::visit(int max_weight_in,
-                     const std::function<bool(const IOSubgraph &)> &output_cb)
+                     const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb)
 {
     const DFG &dfg = config_.dfg();
     int weight_in = 0;
@@ -106,12 +128,18 @@ bool VSFinder::visit(int max_weight_in,
     // find the best-ish (better than optimal) pivot node
     // any predecessor which is not currently-excluded
     int id = -1;
-    for (int u : config_.pred()) {
+    intset pred(dfg.num_nodes());
+    for (int v : config_.nodes()) {
+        for (int u : dfg.in_edges(v)) {
+            pred.add(u);
+        }
+    }
+    pred.remove(config_.nodes());
+    for (int u : pred) {
         if (!F_.contains(u)) {
             id = u;
-            // NOTE we actually deviate from the paper and pick min(config_.pred() - F_) instead of max
-            // (by adding the break stmt)
-            // the goal of picking max(config_.pred() - F_) as per the paper is as a simplification for max(config_.anc() - F)
+            // NOTE we actually deviate from the paper and pick min(preds - F_) instead of max(anc - F_)
+            // the goal of picking max(ancestors - F_) as per the paper is as a simplification for max(config_.anc() - F)
             // which is in turn because this ensures the chosen nodes remain convex at every step
             // however fill_required() and fill_forbidden() fix this differently, right...?
             // the potential benefit of min() could be fewer recursive calls since we can eliminate swaths of nodes all at once with fill_required()
@@ -123,7 +151,7 @@ bool VSFinder::visit(int max_weight_in,
 
     if (id == -1) {
         // no pivot found, this is a leaf! send it!
-        if (!output_cb(config_)) {
+        if (!output_cb(config_, appendices_lazy_)) {
             return false;
         }
 
@@ -150,7 +178,6 @@ bool VSFinder::visit(int max_weight_in,
 
     //  ...and once adding the pivot to the excluded set
     intset F_prev(F_);
-    F_.add(id);
     cluster = config_.dfg().cluster(id);
     if (cluster == -1) {
         F_.add(id);
@@ -206,7 +233,7 @@ void VSFinder::fill_forbidden() {
         // if there exists an edge (u, v) where v is forbidden, forbid u
         for (int v : config_.dfg().out_edges(u)) {
             if (F_.contains(v)) {
-                int cluster = config_.dfg().cluster(u);
+                int cluster = config_.dfg().cluster_end(u);
                 if (cluster != -1) {
                     // forbid all cluster siblings as unit
                     F_.add(cluster);
@@ -225,6 +252,107 @@ void VSFinder::fill_forbidden() {
     }
 }
 
+// This handles when an output needs some of its descendants included since
+// they are dead ends or lead to dead ends
+// Basically a dup of the visit algorithm but going the other way
+bool VSFinder::visit_outputs(int max_weight_in,
+           const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb) {
+    // it's finally time to union-find!
+    std::vector<int> representative_succs(config_.dfg().num_nodes(), -1);
+    // bool has_other_output = false;
+    for (int o : config_.outputs()) {
+        for (int u : config_.dfg().out_edges(o)) {
+            if (config_.dfg().is_forbiddable(u)) {
+                // has_other_output = true;
+                continue;
+            }
+            representative_succs[u] = u;
+            for (int v : config_.dfg().succ(u)) { // this actually enumerates descendants
+                if (representative_succs[v] == -1) {
+                    representative_succs[v] = u;
+                } else {
+                    // uh oh!
+                    u = representative_succs[u] = representative_succs[v];
+                }
+            }
+        }
+    }
+
+    std::function<int(int)> repr_root = [&representative_succs, &repr_root](int v) {
+        int u = representative_succs[v];
+        if (u == -1) {
+            return -1;
+        } else if (u == v) {
+            return u;
+        } else {
+            return representative_succs[v] = repr_root(u);
+        }
+    };
+
+    std::map<int, intset> options_map;
+    for (int v = 0; v < representative_succs.size(); v++) {
+        int u = repr_root(v);
+        if (u == -1) {
+            continue;
+        }
+        options_map.try_emplace(u, config_.dfg().num_nodes()).first->second.add(v);
+    }
+
+    appendices_eager_.clear();
+    appendices_lazy_.clear();
+    for (auto pair : std::move(options_map)) {
+        bool has_inputs = false;
+        for (int v : pair.second) {
+            for (int u : config_.dfg().in_edges(v)) {
+                if (config_.nodes().contains(u) || pair.second.contains(u)) {
+                    continue;
+                }
+                has_inputs = true;
+                break;
+            }
+            if (has_inputs) {
+                break;
+            }
+        }
+        if (has_inputs) {
+            appendices_eager_.emplace_back(std::move(pair.second));
+        } else {
+            appendices_lazy_.emplace_back(pair.second.begin(), pair.second.end());
+        }
+    }
+
+    return visit_outputs_(max_weight_in, output_cb, 0);
+}
+
+bool VSFinder::visit_outputs_(int max_weight_in, const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb, int idx) {
+    if (idx == appendices_eager_.size()) {
+        return VSFinder::visit(max_weight_in, output_cb);
+    }
+
+    for (int u : appendices_eager_[idx]) {
+        config_.add(u);
+    }
+    // when adding children of the outputs we run the risk of removing our outputs! don't do that
+    if (!config_.outputs().size() != original_outputs_.size()) {
+        if (!VSFinder::visit_outputs_(max_weight_in, output_cb, idx + 1)) {
+            return false;
+        }
+    }
+    for (int u : appendices_eager_[idx]) {
+        config_.remove(u);
+    }
+    intset F_prev(F_);
+    for (int u : appendices_eager_[idx]) {
+        F_.add(u);
+    }
+    fill_forbidden();
+    if (!VSFinder::visit_outputs_(max_weight_in, output_cb, idx + 1)) {
+        return false;
+    }
+    F_ = std::move(F_prev);
+    return true;
+}
+
 namespace {
 
 // this computes valOutputs from the paper
@@ -235,12 +363,12 @@ bool vs_enumerate_(const DFG &dfg,
                    int weight,
                    int max_weight_in,
                    int max_weight_out,
-                   const std::function<bool(const IOSubgraph &)> &output_cb)
+                   const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb)
 {
     if (weight > 0) {
         // find convex subgraphs with this output set
         VSFinder finder(dfg, outputs);
-        if (!finder.visit(max_weight_in, output_cb)) {
+        if (!finder.visit_outputs(max_weight_in, output_cb)) {
             return false;
         }
     }
@@ -324,7 +452,7 @@ bool vs_enumerate_(const DFG &dfg,
 bool vs_enumerate(DFG &dfg,
                   int max_weight_in,
                   int max_weight_out,
-                  const std::function<bool(const IOSubgraph &)> &output_cb)
+                  const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb)
 {
     // begin with an empty output set
     Subgraph outputs(dfg);
@@ -367,7 +495,11 @@ bool vs_enumerate(DFG &dfg,
 }
 
 extern "C" {
-    typedef bool (*cse_output_cb)(int num_nodes, int *nodes);
+    typedef struct nodelist_t {
+        int *nodes;
+        int count;
+    } nodelist_t;
+    typedef bool (*cse_output_cb)(int num_nodes, int *nodes, int num_appendices, const nodelist_t *appendices);
     typedef struct node_t {
         bool forbidden;
         bool cluster_trail;
@@ -405,13 +537,18 @@ extern "C" {
         dfg.index();
 
         int result[num_nodes];
-        if (!vs_enumerate(dfg, max_weight_in, max_weight_out, [output_cb, &result] (const IOSubgraph &subgraph) {
+        if (!vs_enumerate(dfg, max_weight_in, max_weight_out, [output_cb, &result] (const IOSubgraph &subgraph, std::vector<std::vector<int>> &appendices) {
             int idx = 0;
+            nodelist_t appendices_c[appendices.size()];
             for (const auto &u : subgraph.nodes()) {
                 result[idx] = u;
                 idx++;
             }
-            return output_cb(idx, result);
+            for (int i = 0; i < appendices.size(); i++) {
+                appendices_c[i].nodes = &appendices[i][0];
+                appendices_c[i].count = appendices[i].size();
+            }
+            return output_cb(idx, result, appendices.size(), &appendices_c[0]);
         } )) {
             return -2;
         }
