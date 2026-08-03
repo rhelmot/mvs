@@ -262,6 +262,7 @@ bool VSFinder::visit_outputs(int max_weight_in,
     // bool has_other_output = false;
     for (int o : config_.outputs()) {
         for (int u : config_.dfg().out_edges(o)) {
+            int ou = u;
             if (config_.dfg().is_forbiddable(u)) {
                 // has_other_output = true;
                 continue;
@@ -271,12 +272,12 @@ bool VSFinder::visit_outputs(int max_weight_in,
             }
             representative_succs[u] = u;
             for (int v : config_.dfg().succ(u)) { // this actually enumerates descendants
-                if (representative_succs[v] == -1) {
+                if (ou != u || representative_succs[v] == -1) {
                     representative_succs[v] = u;
                 } else {
                     // uh oh!
-                    representative_succs[u] = v;
-                    u = v;
+                    representative_succs[ou] = representative_succs[v];
+                    u = representative_succs[v];
                 }
             }
         }
