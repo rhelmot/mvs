@@ -266,13 +266,17 @@ bool VSFinder::visit_outputs(int max_weight_in,
                 // has_other_output = true;
                 continue;
             }
+            if (representative_succs[u] != -1) {
+                continue;
+            }
             representative_succs[u] = u;
             for (int v : config_.dfg().succ(u)) { // this actually enumerates descendants
                 if (representative_succs[v] == -1) {
                     representative_succs[v] = u;
                 } else {
                     // uh oh!
-                    u = representative_succs[u] = representative_succs[v];
+                    representative_succs[u] = v;
+                    u = v;
                 }
             }
         }
@@ -285,7 +289,8 @@ bool VSFinder::visit_outputs(int max_weight_in,
         } else if (u == v) {
             return u;
         } else {
-            return representative_succs[v] = repr_root(u);
+            representative_succs[v] = repr_root(u);
+            return representative_succs[v];
         }
     };
 
