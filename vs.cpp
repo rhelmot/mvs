@@ -184,7 +184,9 @@ bool VSFinder::visit(int max_weight_in,
         } while (config_.dfg().is_cluster_trail(cluster));
     }
     fill_required();
-    visit(max_weight_in, output_cb);
+    if (!visit(max_weight_in, output_cb)) {
+        return false;
+    }
     config_ = std::move(config_prev);
 
     //  ...and once adding the pivot to the excluded set
@@ -199,7 +201,9 @@ bool VSFinder::visit(int max_weight_in,
         } while (config_.dfg().is_cluster_trail(cluster));
     }
     fill_forbidden();
-    visit(max_weight_in, output_cb);
+    if (!visit(max_weight_in, output_cb)) {
+        return false;
+    }
     F_ = std::move(F_prev);
     return true;
 }
