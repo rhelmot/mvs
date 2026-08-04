@@ -24,12 +24,14 @@ static const bool VERIFY = false;
 // implementation of the algorithm for subgraph enumeration under
 // convexity, input and output constraints described in
 // https://doi.org/10.1109/CSE.2009.167
+// Some additions for Audrey's upcoming paper on function outlining
 
 static bool verify_config(const DFG &dfg, const IOSubgraph &config)
 {
     // assert no forbidden nodes in config
-    if (config.nodes().intersects(dfg.forbidden()))
+    if (config.nodes().intersects(dfg.forbidden())) {
         return false;
+    }
 
     // assert config is convex
     return config.nodes() == config.closure();
@@ -50,13 +52,13 @@ static intset config_exclusion(const intset &forbidden, const DFG &dfg, const in
 
     // enumerate all edges in reverse topological order
     for (int v = dfg.num_nodes() - 1; v >= 0; v--) {
-        // only care about edges with b in out (L)
+        // only care about edges with v in out (L)
         // this works because a) reverse toposort b) we require all nodes with
-        // no predecessors are forbidden
+        // no successors are forbidden
         if (out.contains(v)) {
             for (int u : dfg.in_edges(v)) {
                 if (!config.contains(u)) {
-                    out.add(u);  // if (a not in config (Q)) { L <- L OR {a} }
+                    out.add(u);  // if (u not in config (Q)) { L <- L OR {u} }
                 }
             }
         }
@@ -79,12 +81,21 @@ static intset config_exclusion(const intset &forbidden, const DFG &dfg, const in
     return out;
 }
 
+// overload...
+static intset config_exclusion(const intset &forbidden, const DFG &dfg, const vset<int> &config) {
+    intset config2(dfg.num_nodes());
+    for (int u : config) {
+        config2.add(u);
+    }
+    return config_exclusion(forbidden, dfg, config2);
+}
+
 class VSFinder {
 public:
     VSFinder(const DFG &dfg, const Subgraph &outputs)
-        : config_(dfg, outputs.closure())
-        , original_outputs_(outputs.nodes())
-        , F_(config_exclusion(dfg.forbidden(), dfg, outputs.nodes()))
+        : original_outputs_(outputs.nodes())
+        , config_(dfg, outputs.closure())
+        , F_(config_exclusion(dfg.forbidden(), dfg, config_.outputs()))
     {
         fill_forbidden();
         fill_required();
@@ -98,8 +109,8 @@ public:
 private:
     bool visit_outputs_(int max_weight_in,
                const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb, int idx);
-    IOSubgraph config_;
     intset original_outputs_;
+    IOSubgraph config_;
     intset F_;
     std::vector<intset> appendices_eager_;
     std::vector<std::vector<int>> appendices_lazy_;
@@ -257,6 +268,25 @@ void VSFinder::fill_forbidden() {
 // Basically a dup of the visit algorithm but going the other way
 bool VSFinder::visit_outputs(int max_weight_in,
            const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb) {
+    // step 1: make sure we haven't shot ourselves in the foot by getting too many outputs
+    // we can't ever remove with this process (via cluster completion)
+    // this works best here for some reason...
+    // step 2: for all the extra outputs which are forbiddable, fill em in!
+    vset<int> outputs(config_.outputs());  // make a copy since we're mutating
+    for (int u : outputs) {
+        if (original_outputs_.contains(u)) {
+            continue;
+        }
+        if (config_.dfg().is_forbiddable(u) ) {
+            // lol
+            return true;
+        }
+        for (int v : config_.dfg().succ(u)) {
+            // wheeee
+            config_.add(v);
+        }
+    }
+
     // it's finally time to union-find!
     std::vector<int> representative_succs(config_.dfg().num_nodes(), -1);
     // bool has_other_output = false;
@@ -331,7 +361,7 @@ bool VSFinder::visit_outputs(int max_weight_in,
 }
 
 bool VSFinder::visit_outputs_(int max_weight_in, const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb, int idx) {
-    if (idx == appendices_eager_.size()) {
+    if (idx == appendices_eager_.size() && config_.outputs().size() == original_outputs_.size()) {
         return VSFinder::visit(max_weight_in, output_cb);
     }
 
@@ -339,7 +369,9 @@ bool VSFinder::visit_outputs_(int max_weight_in, const std::function<bool(const 
         config_.add(u);
     }
     // when adding children of the outputs we run the risk of removing our outputs! don't do that
-    if (!config_.outputs().size() != original_outputs_.size()) {
+    // also uhhhhhh since we inflate clusters after picking the outputs there
+    // might also be too many outputs to start. make sure we whittle down to the right number
+    if (config_.outputs().size() >= original_outputs_.size()) {
         if (!VSFinder::visit_outputs_(max_weight_in, output_cb, idx + 1)) {
             return false;
         }
@@ -385,7 +417,7 @@ bool vs_enumerate_(const DFG &dfg,
     }
 
     auto exclusion = config_exclusion(seeds, dfg, outputs.nodes());
-    auto pred = outputs.pred();
+    auto anc = outputs.pred();
 
     // we only need to enumerate up to the smallest (toposorted)
     // preexisting output
@@ -396,8 +428,9 @@ bool vs_enumerate_(const DFG &dfg,
 
     // valid nodes: currently-excluded nodes which are not globally
     // forbidden and which are not both a predecessor of the current output
-    // set and having a successor which is both a predecessor of the
+    // set and having a descendant which is both a ancestor of the
     // current output set and currently-excluded
+    // (this ensures that the chosen outputs will always stay outputs I think)
 
     for (int u = 0; u < bound; u++) {
         if (!exclusion.contains(u)) {
@@ -406,24 +439,19 @@ bool vs_enumerate_(const DFG &dfg,
         if (seeds.contains(u)) {
             continue;
         }
-        // I don't understand this condition
-        if (pred.contains(u) && dfg.succ(u).intersects(pred, exclusion)) {
+        // what an odd condition
+        // TODO with my changes to the config_exclusion inputs it's not clear whether
+        // this use of exclusion should actually be the one seeded with just F_
+        if (anc.contains(u) && dfg.succ(u).intersects(anc, exclusion)) {
             continue;
         }
-        int cluster = dfg.cluster(u);
-        if (cluster == -1) {
-            weight += dfg.weight(u);
-            outputs.add(u);
-        } else {
-            // add clusters as units
-            do {
-                weight += dfg.weight(cluster);
-                outputs.add(cluster);
-                cluster++;
-            } while (dfg.is_cluster_trail(cluster));
-            // skip the rest of the cluster since we already handled it
-            u = cluster - 1;
+        // only let output nodes of clusters be used for outputs
+        int cluster_start = dfg.cluster(u);
+        if (cluster_start == u) {
+            continue;
         }
+        weight += dfg.weight(u);
+        outputs.add(u);
 
         if (weight <= max_weight_out) {
             // recurse with the output node(s) added
@@ -438,16 +466,8 @@ bool vs_enumerate_(const DFG &dfg,
             }
         }
 
-        if (cluster == -1) {
-            weight -= dfg.weight(u);
-            outputs.remove(u);
-        } else {
-            do {
-                cluster--;
-                weight -= dfg.weight(cluster);
-                outputs.remove(cluster);
-            } while (dfg.is_cluster_trail(cluster));
-        }
+        weight -= dfg.weight(u);
+        outputs.remove(u);
     }
     return true;
 }

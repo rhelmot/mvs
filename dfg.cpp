@@ -194,7 +194,21 @@ intset Subgraph::succ() const
 
 intset Subgraph::closure() const
 {
-    return nodes_ | (pred() & succ());
+    auto result = nodes_ | (pred() & succ());
+    for (int u = 0; u < dfg_->num_nodes(); u++) {
+        if (!result.contains(u)) {
+            continue;
+        }
+        int cluster = dfg_->cluster(u);
+        if (cluster != -1) {
+            do {
+                result.add(cluster);
+                cluster++;
+            } while (dfg_->is_cluster_trail(cluster));
+            u = cluster - 1;
+        }
+    }
+    return result;
 }
 
 void IOSubgraph::init_weight()
