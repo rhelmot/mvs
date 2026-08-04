@@ -361,8 +361,11 @@ bool VSFinder::visit_outputs(int max_weight_in,
 }
 
 bool VSFinder::visit_outputs_(int max_weight_in, const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb, int idx) {
-    if (idx == appendices_eager_.size() && config_.outputs().size() == original_outputs_.size()) {
-        return VSFinder::visit(max_weight_in, output_cb);
+    if (idx == appendices_eager_.size()) {
+        if (config_.outputs().size() == original_outputs_.size()) {
+            return VSFinder::visit(max_weight_in, output_cb);
+        }
+        return true;
     }
 
     for (int u : appendices_eager_[idx]) {
