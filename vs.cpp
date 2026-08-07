@@ -144,14 +144,7 @@ bool VSFinder::visit(int max_weight_in,
     // find the best-ish (better than optimal) pivot node
     // any predecessor which is not currently-excluded
     int id = -1;
-    intset pred(dfg.num_nodes());
-    for (int v : config_.nodes()) {
-        for (int u : dfg.in_edges(v)) {
-            pred.add(u);
-        }
-    }
-    pred.remove(config_.nodes());
-    for (int u : pred) {
+    for (int u : config_.inputs()) {
         if (!F_.contains(u)) {
             id = u;
             // NOTE we actually deviate from the paper and pick min(preds - F_) instead of max(anc - F_)
@@ -161,7 +154,9 @@ bool VSFinder::visit(int max_weight_in,
             // the potential benefit of min() could be fewer recursive calls since we can eliminate swaths of nodes all at once with fill_required()
             // though it's not clear that picking max() doesn't have the same effect for maximizing elimination via fill_forbidden()
             // TODO make sure we didn't just backtrack to the paper this paper is improving on...
-            break;
+            if (id == -1 || u < id) {
+                id = u;
+            }
         }
     }
 
@@ -222,6 +217,9 @@ bool VSFinder::fill_required() {
     auto cdg_pred = config_.cdg_pred();
     for (int v = 0; v < config_.dfg().num_nodes(); v++) {
         if (config_.nodes().contains(v)) {
+            if (F_.contains(v)) {
+                return false;
+            }
             continue;
         }
         if (!F_.contains(v)) {
@@ -281,6 +279,9 @@ bool VSFinder::fill_forbidden() {
     auto cdg_pred = config_.cdg_pred();
     for (int u = config_.dfg().num_nodes() - 1; u >= 0; u--) {
         if (F_.contains(u)) {
+            if (config_.nodes().contains(u)) {
+                return false;
+            }
             continue;
         }
         if (!config_.nodes().contains(u)) {
@@ -308,7 +309,7 @@ bool VSFinder::fill_forbidden() {
             continue;
         }
         for (int v : config_.dfg().cdg_out_edges(u)) {
-            if (F_.contains(v)) {
+            if (F_.contains(v) && cdg_pred.contains(v)) {
                 int cluster = config_.dfg().cluster_end(u);
                 if (cluster != -1) {
                     // forbid all cluster siblings as unit
@@ -447,6 +448,7 @@ bool VSFinder::visit_outputs_(int max_weight_in, const std::function<bool(const 
         return true;
     }
 
+    IOSubgraph config_prev(config_);
     for (int u : appendices_eager_[idx]) {
         config_.add(u);
     }
@@ -460,9 +462,8 @@ bool VSFinder::visit_outputs_(int max_weight_in, const std::function<bool(const 
             }
         }
     }
-    for (int u : appendices_eager_[idx]) {
-        config_.remove(u);
-    }
+    config_ = std::move(config_prev);
+
     intset F_prev(F_);
     for (int u : appendices_eager_[idx]) {
         F_.add(u);
