@@ -124,6 +124,10 @@ void DFG::index()
             nodes_[v].pred.add(nodes_[u].pred);
             nodes_[v].pred.add(u);
         }
+        for (auto &v : cdg_out_edges(u)) {
+            nodes_[v].cdg_pred.add(nodes_[u].cdg_pred);
+            nodes_[v].cdg_pred.add(u);
+        }
     }
 
     for (auto it = topo_order.rbegin(); it != topo_order.rend(); it++) {
@@ -134,6 +138,10 @@ void DFG::index()
         for (auto &v : out_edges(u)) {
             nodes_[u].succ.add(nodes_[v].succ);
             nodes_[u].succ.add(v);
+        }
+        for (auto &v : cdg_out_edges(u)) {
+            nodes_[u].cdg_succ.add(nodes_[v].cdg_succ);
+            nodes_[u].cdg_succ.add(v);
         }
     }
 
@@ -192,9 +200,46 @@ intset Subgraph::succ() const
     return out.remove(nodes_);
 }
 
+intset Subgraph::cdg_pred() const
+{
+    intset out(dfg_->num_nodes());
+    for (const auto &u : nodes_) {
+        out.add(dfg_->cdg_pred(u));
+    }
+    return out.remove(nodes_);
+}
+
+// all nodes which are descendants of the subgraph
+intset Subgraph::cdg_succ() const
+{
+    intset out(dfg_->num_nodes());
+    for (const auto &u : nodes_) {
+        out.add(dfg_->cdg_succ(u));
+    }
+    return out.remove(nodes_);
+}
+
 intset Subgraph::closure() const
 {
     auto result = nodes_ | (pred() & succ());
+    for (int u = 0; u < dfg_->num_nodes(); u++) {
+        if (!result.contains(u)) {
+            continue;
+        }
+        int cluster = dfg_->cluster(u);
+        if (cluster != -1) {
+            do {
+                result.add(cluster);
+                cluster++;
+            } while (dfg_->is_cluster_trail(cluster));
+            u = cluster - 1;
+        }
+    }
+    return result;
+}
+intset Subgraph::cdg_closure() const
+{
+    auto result = nodes_ | (cdg_pred() & cdg_succ());
     for (int u = 0; u < dfg_->num_nodes(); u++) {
         if (!result.contains(u)) {
             continue;

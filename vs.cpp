@@ -97,8 +97,7 @@ public:
         , config_(dfg, outputs.closure())
         , F_(config_exclusion(dfg.forbidden(), dfg, config_.outputs()))
     {
-        fill_forbidden();
-        fill_required();
+        dead_on_arrival_ = !fill_forbidden() || !fill_required();
     }
 
     bool visit(int max_weight_in,
@@ -112,17 +111,23 @@ private:
     intset original_outputs_;
     IOSubgraph config_;
     intset F_;
+    bool dead_on_arrival_;
+
     std::vector<intset> appendices_eager_;
     std::vector<std::vector<int>> appendices_lazy_;
 
-    void fill_required();
-    void fill_forbidden();
+    bool fill_required();
+    bool fill_forbidden();
 };
 
 // this computes valConv from the paper
 bool VSFinder::visit(int max_weight_in,
                      const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb)
 {
+    if (dead_on_arrival_) {
+        return true;
+    }
+
     const DFG &dfg = config_.dfg();
     int weight_in = 0;
     for (int u : config_.inputs()) {
@@ -183,9 +188,10 @@ bool VSFinder::visit(int max_weight_in,
             cluster++;
         } while (config_.dfg().is_cluster_trail(cluster));
     }
-    fill_required();
-    if (!visit(max_weight_in, output_cb)) {
-        return false;
+    if (fill_required()) {
+        if (!visit(max_weight_in, output_cb)) {
+            return false;
+        }
     }
     config_ = std::move(config_prev);
 
@@ -200,9 +206,10 @@ bool VSFinder::visit(int max_weight_in,
             cluster++;
         } while (config_.dfg().is_cluster_trail(cluster));
     }
-    fill_forbidden();
-    if (!visit(max_weight_in, output_cb)) {
-        return false;
+    if (fill_forbidden()) {
+        if (!visit(max_weight_in, output_cb)) {
+            return false;
+        }
     }
     F_ = std::move(F_prev);
     return true;
@@ -211,60 +218,124 @@ bool VSFinder::visit(int max_weight_in,
 // we chose to require the pivot
 // ensure all descendants of this pivot are also required
 // (since by this stage outputs are already fixed)
-void VSFinder::fill_required() {
+bool VSFinder::fill_required() {
+    auto cdg_pred = config_.cdg_pred();
     for (int v = 0; v < config_.dfg().num_nodes(); v++) {
-        if (config_.nodes().contains(v) || F_.contains(v)) {
+        if (config_.nodes().contains(v)) {
             continue;
         }
-        // if there exist an edge(u, v) where u is required, require v
-        for (int u : config_.dfg().in_edges(v)) {
-            if (config_.nodes().contains(u) && !original_outputs_.contains(u)) {
+        if (!F_.contains(v)) {
+            // if there exist an edge(u, v) where u is required, require v
+            for (int u : config_.dfg().in_edges(v)) {
+                if (config_.nodes().contains(u) && !original_outputs_.contains(u)) {
+                    int cluster = config_.dfg().cluster(v);
+                    if (cluster != -1) {
+                        // add all cluster siblings as unit
+                        do {
+                            config_.add(cluster);
+                            cluster++;
+                        } while (config_.dfg().is_cluster_trail(cluster));
+                        // skip to the end of the cluster
+                        v = cluster - 1;
+                    } else {
+                        config_.add(v);
+                    }
+                    break;
+                }
+            }
+        }
+        if (config_.nodes().contains(v) || !cdg_pred.contains(v)) {
+            continue;
+        }
+        for (int u : config_.dfg().cdg_in_edges(v)) {
+            if (config_.nodes().contains(u)) {
                 int cluster = config_.dfg().cluster(v);
                 if (cluster != -1) {
                     // add all cluster siblings as unit
                     do {
+                        if (F_.contains(cluster)) {
+                            return false;
+                        }
                         config_.add(cluster);
                         cluster++;
                     } while (config_.dfg().is_cluster_trail(cluster));
                     // skip to the end of the cluster
                     v = cluster - 1;
                 } else {
+                    if (F_.contains(v)) {
+                        return false;
+                    }
                     config_.add(v);
                 }
                 break;
             }
         }
     }
+    return true;
 }
 
 // we chose to forbid the pivot
 // ensure we can never try to go down any path which can lead to the pivot
 // (since by this stage outputs are already fixed)
-void VSFinder::fill_forbidden() {
+bool VSFinder::fill_forbidden() {
+    auto cdg_pred = config_.cdg_pred();
     for (int u = config_.dfg().num_nodes() - 1; u >= 0; u--) {
-        if (config_.nodes().contains(u) || F_.contains(u)) {
+        if (F_.contains(u)) {
             continue;
         }
-        // if there exists an edge (u, v) where v is forbidden, forbid u
-        for (int v : config_.dfg().out_edges(u)) {
+        if (!config_.nodes().contains(u)) {
+            // if there exists an edge (u, v) where v is forbidden, forbid u
+            for (int v : config_.dfg().out_edges(u)) {
+                if (F_.contains(v)) {
+                    int cluster = config_.dfg().cluster_end(u);
+                    if (cluster != -1) {
+                        // forbid all cluster siblings as unit
+                        F_.add(cluster);
+                        while (config_.dfg().is_cluster_trail(cluster)) {
+                            cluster--;
+                            F_.add(cluster);
+                        }
+                        // skip to the end of the cluster
+                        u = cluster;
+                    } else {
+                        F_.add(u);
+                    }
+                    break;
+                }
+            }
+        }
+        if (F_.contains(u) || !cdg_pred.contains(u)) {
+            continue;
+        }
+        for (int v : config_.dfg().cdg_out_edges(u)) {
             if (F_.contains(v)) {
                 int cluster = config_.dfg().cluster_end(u);
                 if (cluster != -1) {
                     // forbid all cluster siblings as unit
+                    if (config_.nodes().contains(cluster)) {
+                        return false;
+                    }
                     F_.add(cluster);
                     while (config_.dfg().is_cluster_trail(cluster)) {
+                        if (config_.nodes().contains(cluster)) {
+                            return false;
+                        }
                         cluster--;
                         F_.add(cluster);
                     }
                     // skip to the end of the cluster
                     u = cluster;
                 } else {
+                    if (config_.nodes().contains(u)) {
+                        return false;
+                    }
                     F_.add(u);
                 }
                 break;
             }
         }
     }
+    return true;
 }
 
 // This handles when an output needs some of its descendants included since
@@ -272,6 +343,10 @@ void VSFinder::fill_forbidden() {
 // Basically a dup of the visit algorithm but going the other way
 bool VSFinder::visit_outputs(int max_weight_in,
            const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb) {
+    if (dead_on_arrival_) {
+        return true;
+    }
+
     // step 1: make sure we haven't shot ourselves in the foot by getting too many outputs
     // we can't ever remove with this process (via cluster completion)
     // this works best here for some reason...
@@ -354,7 +429,7 @@ bool VSFinder::visit_outputs(int max_weight_in,
                 break;
             }
         }
-        if (has_inputs) {
+        if (has_inputs || config_.dfg().has_cdg_edges()) {
             appendices_eager_.emplace_back(std::move(pair.second));
         } else {
             appendices_lazy_.emplace_back(pair.second.begin(), pair.second.end());
@@ -379,8 +454,10 @@ bool VSFinder::visit_outputs_(int max_weight_in, const std::function<bool(const 
     // also uhhhhhh since we inflate clusters after picking the outputs there
     // might also be too many outputs to start. make sure we whittle down to the right number
     if (config_.outputs().size() >= original_outputs_.size()) {
-        if (!VSFinder::visit_outputs_(max_weight_in, output_cb, idx + 1)) {
-            return false;
+        if (fill_required()) {
+            if (!VSFinder::visit_outputs_(max_weight_in, output_cb, idx + 1)) {
+                return false;
+            }
         }
     }
     for (int u : appendices_eager_[idx]) {
@@ -390,9 +467,10 @@ bool VSFinder::visit_outputs_(int max_weight_in, const std::function<bool(const 
     for (int u : appendices_eager_[idx]) {
         F_.add(u);
     }
-    fill_forbidden();
-    if (!VSFinder::visit_outputs_(max_weight_in, output_cb, idx + 1)) {
-        return false;
+    if (fill_forbidden()) {
+        if (!VSFinder::visit_outputs_(max_weight_in, output_cb, idx + 1)) {
+            return false;
+        }
     }
     F_ = std::move(F_prev);
     return true;
@@ -548,6 +626,8 @@ extern "C" {
         node_t *nodes,
         int num_edges,
         edge_t *edges,
+        int num_cdg_edges,
+        edge_t *cdg_edges,
         cse_output_cb output_cb)
     {
         DFG dfg("", num_nodes, 0);
@@ -566,6 +646,9 @@ extern "C" {
         }
         for (int i = 0; i < num_edges; i++) {
             dfg.add_edge(edges[i].u, edges[i].v);
+        }
+        for (int i = 0; i < num_cdg_edges; i++) {
+            dfg.add_cdg_edge(cdg_edges[i].u, cdg_edges[i].v);
         }
         dfg.index();
 

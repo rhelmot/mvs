@@ -12,14 +12,20 @@ class DFG {
         Node(int num_nodes)
             : pred(num_nodes)
             , succ(num_nodes)
+            , cdg_pred(num_nodes)
+            , cdg_succ(num_nodes)
         {
         }
 
         vset<int> in_list;
         vset<int> out_list;
+        vset<int> cdg_in_list;
+        vset<int> cdg_out_list;
         int weight = 1;
         intset pred;
         intset succ;
+        intset cdg_pred;
+        intset cdg_succ;
     };
 
 public:
@@ -41,10 +47,19 @@ public:
         nodes_[u].out_list.add(v);
         nodes_[v].in_list.add(u);
     }
+    void add_cdg_edge(int u, int v)
+    {
+        nodes_[u].cdg_out_list.add(v);
+        nodes_[v].cdg_in_list.add(u);
+        has_cdg_edges_ = true;
+    }
     void remove_edge(int u, int v)
     {
         nodes_[u].out_list.remove(v);
         nodes_[v].in_list.remove(u);
+    }
+    bool has_cdg_edges() const {
+        return has_cdg_edges_;
     }
     void set_forbidden(int u) {
         forbidden_.add(u);
@@ -89,8 +104,12 @@ public:
     int &weight(int u) { return nodes_[u].weight; }
     const vset<int> &in_edges(int u) const { return nodes_[u].in_list; }
     const vset<int> &out_edges(int u) const { return nodes_[u].out_list; }
+    const vset<int> &cdg_in_edges(int u) const { return nodes_[u].cdg_in_list; }
+    const vset<int> &cdg_out_edges(int u) const { return nodes_[u].cdg_out_list; }
     const intset &pred(int u) const { return nodes_[u].pred; }
     const intset &succ(int u) const { return nodes_[u].succ; }
+    const intset &cdg_pred(int u) const { return nodes_[u].cdg_pred; }
+    const intset &cdg_succ(int u) const { return nodes_[u].cdg_succ; }
     bool is_forbidden(int u) const { return forbidden_.contains(u); }
     const intset &forbidden() const { return forbidden_; }
     bool is_forbiddable(int u) const { return forbiddable_.contains(u); }
@@ -103,6 +122,7 @@ private:
     intset clusters_;
     intset forbiddable_;
 
+    bool has_cdg_edges_ = false;
     std::vector<Node> nodes_;
 };
 
@@ -158,6 +178,9 @@ public:
     intset pred() const;
     intset succ() const;
     intset closure() const;
+    intset cdg_pred() const;
+    intset cdg_succ() const;
+    intset cdg_closure() const;
 
 protected:
     const DFG *dfg_;
