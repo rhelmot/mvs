@@ -271,9 +271,10 @@ bool VSFinder::fill_required() {
             if (config_.nodes().contains(u)) {
                 if (dfg_succ.contains(v)) {
                     // if this is a descendant of the dfg cluster and yet we
-                    // didn't find it through a dfg link first, this must
+                    // didn't find it through a dfg link first, this might
                     // de-convexify the graph (path thru the outputs)
-                    return false;
+                    // we need to check at the end if we've done this
+                    again = true;
                 }
                 int cluster = config_.dfg().cluster(v);
                 if (cluster != -1) {
@@ -299,6 +300,22 @@ bool VSFinder::fill_required() {
     }
     if (!again) {
         // verify_config(config_);
+        // check that we didn't close up any outputs
+        for (int u : original_outputs_) {
+            if (config_.dfg().out_edges(u).empty()) {
+                continue;
+            }
+            bool ok = false;
+            for (int v : config_.dfg().out_edges(u)) {
+                if (!config_.nodes().contains(v)) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok) {
+                return false;
+            }
+        }
         return true;
     }
     return fill_required();
@@ -450,19 +467,23 @@ bool VSFinder::visit_outputs(int max_weight_in,
     appendices_lazy_.clear();
     for (auto pair : std::move(options_map)) {
         bool has_inputs = false;
-        for (int v : pair.second) {
-            for (int u : config_.dfg().in_edges(v)) {
-                if (config_.nodes().contains(u) || pair.second.contains(u)) {
-                    continue;
+        if (config_.dfg().has_cdg_edges()) {
+            has_inputs = true;
+        } else {
+            for (int v : pair.second) {
+                for (int u : config_.dfg().in_edges(v)) {
+                    if (config_.nodes().contains(u) || pair.second.contains(u)) {
+                        continue;
+                    }
+                    has_inputs = true;
+                    break;
                 }
-                has_inputs = true;
-                break;
-            }
-            if (has_inputs) {
-                break;
+                if (has_inputs) {
+                    break;
+                }
             }
         }
-        if (has_inputs || config_.dfg().has_cdg_edges()) {
+        if (has_inputs) {
             appendices_eager_.emplace_back(std::move(pair.second));
         } else {
             appendices_lazy_.emplace_back(pair.second.begin(), pair.second.end());
