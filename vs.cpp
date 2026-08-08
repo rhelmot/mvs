@@ -26,15 +26,13 @@ static const bool VERIFY = false;
 // https://doi.org/10.1109/CSE.2009.167
 // Some additions for Audrey's upcoming paper on function outlining
 
-static bool verify_config(const DFG &dfg, const IOSubgraph &config)
+static void verify_config(const IOSubgraph &config)
 {
     // assert no forbidden nodes in config
-    if (config.nodes().intersects(dfg.forbidden())) {
-        return false;
-    }
-
+    assert(!config.nodes().intersects(config.dfg().forbidden()));
     // assert config is convex
-    return config.nodes() == config.closure();
+    assert(config.nodes() == config.closure());
+    assert(config.nodes() == config.cdg_closure());
 }
 
 // this is the exclude_F function from the paper
@@ -162,12 +160,13 @@ bool VSFinder::visit(int max_weight_in,
 
     if (id == -1) {
         // no pivot found, this is a leaf! send it!
+        if (VERIFY) {
+            verify_config(config_);
+        }
+
         if (!output_cb(config_, appendices_lazy_)) {
             return false;
         }
-
-        if (VERIFY)
-            assert(verify_config(dfg, config_));
 
         return true;
     }
@@ -183,6 +182,7 @@ bool VSFinder::visit(int max_weight_in,
             cluster++;
         } while (config_.dfg().is_cluster_trail(cluster));
     }
+    // verify_config(config_);
     if (fill_required()) {
         if (!visit(max_weight_in, output_cb)) {
             return false;
@@ -213,8 +213,12 @@ bool VSFinder::visit(int max_weight_in,
 // we chose to require the pivot
 // ensure all descendants of this pivot are also required
 // (since by this stage outputs are already fixed)
+// TODO this could maybe be optimzied by tracking min and max ranges for each sweep
 bool VSFinder::fill_required() {
+    bool again = false;
     auto cdg_pred = config_.cdg_pred();
+    auto cdg_succ = config_.cdg_succ();
+    auto dfg_succ = config_.succ();
     for (int v = 0; v < config_.dfg().num_nodes(); v++) {
         if (config_.nodes().contains(v)) {
             if (F_.contains(v)) {
@@ -227,15 +231,33 @@ bool VSFinder::fill_required() {
             for (int u : config_.dfg().in_edges(v)) {
                 if (config_.nodes().contains(u) && !original_outputs_.contains(u)) {
                     int cluster = config_.dfg().cluster(v);
+                    int vc = (cluster == -1) ? v : cluster;
+                    if (!cdg_succ.contains(vc)) {
+                        cdg_succ.add(vc);
+                        cdg_succ.add(config_.dfg().cdg_succ(vc));
+                    } else {
+                        for (int uu : config_.dfg().cdg_in_edges(vc)) {
+                            if (!config_.nodes().contains(uu) && cdg_succ.contains(uu)) {
+                                again = true;
+                                break;
+                            }
+                        }
+                    }
                     if (cluster != -1) {
                         // add all cluster siblings as unit
                         do {
+                            if (F_.contains(cluster)) {
+                                return false;
+                            }
                             config_.add(cluster);
                             cluster++;
                         } while (config_.dfg().is_cluster_trail(cluster));
                         // skip to the end of the cluster
                         v = cluster - 1;
                     } else {
+                        if (F_.contains(v)) {
+                            return false;
+                        }
                         config_.add(v);
                     }
                     break;
@@ -247,6 +269,12 @@ bool VSFinder::fill_required() {
         }
         for (int u : config_.dfg().cdg_in_edges(v)) {
             if (config_.nodes().contains(u)) {
+                if (dfg_succ.contains(v)) {
+                    // if this is a descendant of the dfg cluster and yet we
+                    // didn't find it through a dfg link first, this must
+                    // de-convexify the graph (path thru the outputs)
+                    return false;
+                }
                 int cluster = config_.dfg().cluster(v);
                 if (cluster != -1) {
                     // add all cluster siblings as unit
@@ -269,7 +297,11 @@ bool VSFinder::fill_required() {
             }
         }
     }
-    return true;
+    if (!again) {
+        // verify_config(config_);
+        return true;
+    }
+    return fill_required();
 }
 
 // we chose to forbid the pivot
@@ -449,6 +481,7 @@ bool VSFinder::visit_outputs_(int max_weight_in, const std::function<bool(const 
     }
 
     IOSubgraph config_prev(config_);
+    // verify_config(config_);
     for (int u : appendices_eager_[idx]) {
         config_.add(u);
     }

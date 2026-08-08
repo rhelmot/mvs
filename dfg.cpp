@@ -107,39 +107,31 @@ std::unique_ptr<DFG> DFG::make_dfg(std::istream &in, bool set_weights)
 
 void DFG::index()
 {
-    // compute a topological ordering, just in case
-    std::list<int> topo_order;
-    DFSVisitor visitor(*this, [this, &topo_order](int u) {
+    for (int u = 0; u < num_nodes(); u++) {
         nodes_[u].pred.clear();
         nodes_[u].succ.clear();
-        topo_order.push_front(u);
-    });
+        nodes_[u].cdg_pred.clear();
+        nodes_[u].cdg_succ.clear();
+    }
 
     // compute pred and succ sets for each node
-    for (auto &u : topo_order) {
-        // if (F_.contains(u))
-        //   continue;
-
-        for (auto &v : out_edges(u)) {
+    for (int u = 0; u < num_nodes(); u++) {
+        for (int v : out_edges(u)) {
             nodes_[v].pred.add(nodes_[u].pred);
             nodes_[v].pred.add(u);
         }
-        for (auto &v : cdg_out_edges(u)) {
+        for (int v : cdg_out_edges(u)) {
             nodes_[v].cdg_pred.add(nodes_[u].cdg_pred);
             nodes_[v].cdg_pred.add(u);
         }
     }
 
-    for (auto it = topo_order.rbegin(); it != topo_order.rend(); it++) {
-        auto u = *it;
-        // if (F_.contains(u))
-        //   continue;
-
-        for (auto &v : out_edges(u)) {
+    for (int u = num_nodes() - 1; u >= 0; u--) {
+        for (int v : out_edges(u)) {
             nodes_[u].succ.add(nodes_[v].succ);
             nodes_[u].succ.add(v);
         }
-        for (auto &v : cdg_out_edges(u)) {
+        for (int v : cdg_out_edges(u)) {
             nodes_[u].cdg_succ.add(nodes_[v].cdg_succ);
             nodes_[u].cdg_succ.add(v);
         }
