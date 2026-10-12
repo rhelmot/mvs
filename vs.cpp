@@ -98,6 +98,7 @@ public:
         dead_on_arrival_ = !fill_forbidden() || !fill_required();
     }
 
+    bool too_many_inputs(int max_weight_in);
     bool visit(int max_weight_in,
                const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb);
     bool visit_outputs(int max_weight_in,
@@ -118,14 +119,7 @@ private:
     bool fill_forbidden();
 };
 
-// this computes valConv from the paper
-bool VSFinder::visit(int max_weight_in,
-                     const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb)
-{
-    if (dead_on_arrival_) {
-        return true;
-    }
-
+bool VSFinder::too_many_inputs(int max_weight_in) {
     const DFG &dfg = config_.dfg();
     int weight_in = 0;
     for (int u : config_.inputs()) {
@@ -134,10 +128,21 @@ bool VSFinder::visit(int max_weight_in,
             weight_in += dfg.weight(u) ;
         }
     }
+    return weight_in > max_weight_in;
+}
+
+// this computes valConv from the paper
+bool VSFinder::visit(int max_weight_in,
+                     const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb)
+{
+    if (dead_on_arrival_) {
+        return true;
+    }
 
     // this branch has too many inputs, don't bother looking further
-    if (weight_in > max_weight_in)
+    if (too_many_inputs(max_weight_in)) {
         return true;
+    }
 
     // find the best-ish (better than optimal) pivot node
     // any predecessor which is not currently-excluded
@@ -494,6 +499,9 @@ bool VSFinder::visit_outputs(int max_weight_in,
 }
 
 bool VSFinder::visit_outputs_(int max_weight_in, const std::function<bool(const IOSubgraph &, std::vector<std::vector<int>> &)> &output_cb, int idx) {
+    if (too_many_inputs(max_weight_in)) {
+        return true;
+    }
     if (idx == appendices_eager_.size()) {
         if (config_.outputs().size() == original_outputs_.size()) {
             return VSFinder::visit(max_weight_in, output_cb);
@@ -719,7 +727,13 @@ extern "C" {
                 appendices_c[i].nodes = &appendices[i][0];
                 appendices_c[i].count = appendices[i].size();
             }
-            return output_cb(idx, result, appendices.size(), &appendices_c[0]);
+            int r = output_cb(idx, result, appendices.size(), &appendices_c[0]);
+            if (r == -3) {
+                // this condition is not reachable
+                // it exists only to prevent the complier from discarding this debug method
+                subgraph.pp();
+            }
+            return r;
         } )) {
             return -2;
         }

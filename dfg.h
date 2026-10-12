@@ -182,6 +182,10 @@ public:
     intset cdg_succ() const;
     intset cdg_closure() const;
 
+    std::vector<int> pp() const {
+        return nodes_.vec();
+    }
+
 protected:
     const DFG *dfg_;
     intset nodes_;

@@ -28,6 +28,7 @@
 #include <cassert>
 #include <limits>
 #include <memory>
+#include <vector>
 
 class intset {
 private:
@@ -47,6 +48,11 @@ private:
 
 public:
     unsigned max_size() const { return num_bits_; }
+
+    std::vector<int> vec() const {
+        std::vector<int>r(begin(), end());
+        return r;
+    }
 
     intset(unsigned size)
     {
